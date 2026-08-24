@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from "react";
+const { useState, useEffect, useRef, useMemo } = React;
 
 /* ================================================================
    JIANGHU-NET — DESIGN TOKENS
