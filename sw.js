@@ -1,4 +1,4 @@
-const CACHE_NAME = "jianghu-net-cache-v1";
+const CACHE_NAME = "jianghu-net-cache-v2";
 const SHELL_ASSETS = [
   "./index.html",
   "./app.jsx",
@@ -26,27 +26,16 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
-
-  // Only manage same-origin app-shell requests.
-  // Firebase Firestore calls and CDN scripts (React/Babel/Firebase) are
-  // cross-origin and always go straight to the network — the app needs
-  // live data, so we never want a stale cached copy of those.
   if (url.origin !== self.location.origin) {
     return;
   }
-
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      return (
-        cached ||
-        fetch(event.request)
-          .then((response) => {
-            const copy = response.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
-            return response;
-          })
-          .catch(() => cached)
-      );
-    })
+    fetch(event.request)
+      .then((response) => {
+        const copy = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+        return response;
+      })
+      .catch(() => caches.match(event.request))
   );
 });
