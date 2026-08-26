@@ -1,3 +1,7 @@
+// React/ReactDOM are loaded as global UMD scripts in index.html (no bundler,
+// no module system here), so we destructure hooks from the global instead
+// of using an ES "import" statement (which Babel-standalone cannot resolve
+// without a module loader and would fail silently at runtime).
 const { useState, useEffect, useRef, useMemo } = React;
 
 /* ================================================================
@@ -109,6 +113,34 @@ function fmt(n) {
   return new Intl.NumberFormat("id-ID").format(n);
 }
 
+// Resizes a user-uploaded cover image down to a small portrait JPEG and
+// returns it as a base64 data URL. Kept intentionally small (max 300x420,
+// JPEG quality ~0.72) so a cover comfortably fits inside a single Firestore
+// document alongside the rest of the novel's metadata (well under the
+// 900KB per-write cap enforced by our security rules).
+function fileToResizedDataURL(file, maxW = 300, maxH = 420, quality = 0.72) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const ratio = Math.min(maxW / img.width, maxH / img.height, 1);
+        const targetW = Math.max(1, Math.round(img.width * ratio));
+        const targetH = Math.max(1, Math.round(img.height * ratio));
+        const canvas = document.createElement("canvas");
+        canvas.width = targetW;
+        canvas.height = targetH;
+        canvas.getContext("2d").drawImage(img, 0, 0, targetW, targetH);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
 /* ---------------- storage helpers ----------------
    Backed by Firebase Firestore so data is global across every
    device and reader — window.storage (Claude-only) is no longer used.
@@ -170,6 +202,52 @@ async function sJSON(key, obj, shared) {
 }
 
 /* ---------------- signature: Giok Lock ---------------- */
+// Reusable cover renderer: shows the uploaded photo when a novel has one,
+// otherwise falls back to the calligraphy-glyph placeholder used before
+// cover uploads existed. Every card/list/hero that displays a novel cover
+// goes through this so the two visual styles never drift apart.
+function CoverThumb({ novel, size = "md", radius = 10 }) {
+  const dims = {
+    sm: { w: 50, h: 66, font: 24 },
+    md: { w: 110, h: 148, font: 40 },
+    lg: { w: 92, h: 124, font: 46 },
+  }[size] || { w: 110, h: 148, font: 40 };
+
+  if (novel.coverImage) {
+    return (
+      <div
+        style={{
+          width: dims.w,
+          height: dims.h,
+          borderRadius: radius,
+          backgroundImage: `url("${novel.coverImage}")`,
+          backgroundSize: "cover",
+          backgroundPosition: "center",
+          border: `1px solid ${C.border}`,
+          flexShrink: 0,
+        }}
+      />
+    );
+  }
+  return (
+    <div
+      style={{
+        width: dims.w,
+        height: dims.h,
+        borderRadius: radius,
+        background: `linear-gradient(160deg, ${C.surfaceHi}, ${C.surface})`,
+        border: `1px solid ${C.border}`,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flexShrink: 0,
+      }}
+    >
+      <span style={{ fontFamily: "'Noto Serif SC', serif", fontSize: dims.font, color: C.jade, fontWeight: 800 }}>{novel.glyph}</span>
+    </div>
+  );
+}
+
 function GiokLock({ size = 28, broken = false, tone = "jade" }) {
   const color = tone === "gold" ? C.gold : C.jade;
   return (
@@ -336,9 +414,13 @@ function App() {
   function push(screen, params = {}) {
     setStack((s) => [...s, { screen, params }]);
   }
-    function pop() {
+  function pop() {
     setStack((s) => s.slice(0, -1));
   }
+  // Used for lateral navigation (e.g. next/previous chapter) that should
+  // SWAP the current screen instead of piling another one onto the stack —
+  // otherwise reading N chapters forward means pressing back N times before
+  // the bottom nav / main menu becomes reachable again.
   function replace(screen, params = {}) {
     setStack((s) => (s.length ? [...s.slice(0, -1), { screen, params }] : [{ screen, params }]));
   }
@@ -352,7 +434,7 @@ function App() {
     return true;
   }
 
-  async function createNovel({ title, synopsis, genre, glyph }) {
+  async function createNovel({ title, synopsis, genre, glyph, coverImage }) {
     const id = uid("novel");
     const novel = {
       id,
@@ -360,6 +442,7 @@ function App() {
       synopsis,
       genre,
       glyph,
+      coverImage: coverImage || null,
       author: username,
       chapterIds: [],
       frameworks: [],
@@ -751,14 +834,28 @@ function HomeScreen({ ctx }) {
             position: "relative",
             overflow: "hidden",
             cursor: "pointer",
-            background: `linear-gradient(135deg, ${C.jadeDeep} 0%, #0c1f16 60%, ${C.bg} 100%)`,
+            background: hero[heroIdx].coverImage
+              ? `url("${hero[heroIdx].coverImage}") center/cover`
+              : `linear-gradient(135deg, ${C.jadeDeep} 0%, #0c1f16 60%, ${C.bg} 100%)`,
             border: `1px solid ${C.border}`,
           }}
         >
-          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "flex-end", paddingRight: 18, opacity: 0.16 }}>
-            <span style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 120, color: C.gold, fontWeight: 900 }}>{hero[heroIdx].glyph}</span>
-          </div>
-          <div style={{ position: "absolute", inset: 0, padding: 18, display: "flex", flexDirection: "column", justifyContent: "flex-end" }}>
+          {!hero[heroIdx].coverImage && (
+            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "flex-end", paddingRight: 18, opacity: 0.16 }}>
+              <span style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 120, color: C.gold, fontWeight: 900 }}>{hero[heroIdx].glyph}</span>
+            </div>
+          )}
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              padding: 18,
+              display: "flex",
+              flexDirection: "column",
+              justifyContent: "flex-end",
+              background: hero[heroIdx].coverImage ? "linear-gradient(180deg, transparent 40%, rgba(0,0,0,0.75) 100%)" : "none",
+            }}
+          >
             <div style={{ fontSize: 10, letterSpacing: 1.5, color: C.gold, fontWeight: 700, textTransform: "uppercase" }}>Novel Unggulan</div>
             <div style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 19, marginTop: 4 }}>{hero[heroIdx].title}</div>
             <div style={{ fontSize: 11.5, color: C.textSoft, marginTop: 2 }}>oleh {hero[heroIdx].author}</div>
@@ -816,8 +913,8 @@ function NovelRow({ title, subtitle, novels, ctx }) {
       <div style={{ display: "flex", gap: 12, overflowX: "auto", padding: "0 18px 4px", scrollbarWidth: "none" }}>
         {novels.map((n) => (
           <div key={n.id} onClick={() => push("story", { novelId: n.id })} style={{ width: 110, flexShrink: 0, cursor: "pointer" }}>
-            <div style={{ width: 110, height: 148, borderRadius: 10, background: `linear-gradient(160deg, ${C.surfaceHi}, ${C.surface})`, border: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 6 }}>
-              <span style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 40, color: C.jade, fontWeight: 800 }}>{n.glyph}</span>
+            <div style={{ marginBottom: 6 }}>
+              <CoverThumb novel={n} size="md" />
             </div>
             <div style={{ fontSize: 12, fontWeight: 700, lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{n.title}</div>
             <div style={{ fontSize: 10, color: C.textFaint, marginTop: 2 }}>{n.author}</div>
@@ -877,9 +974,7 @@ function ExploreScreen({ ctx }) {
 function NovelListCard({ novel, onOpen }) {
   return (
     <div onClick={onOpen} style={{ display: "flex", gap: 12, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 12, cursor: "pointer" }}>
-      <div style={{ width: 54, height: 72, borderRadius: 8, background: C.surfaceHi, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-        <span style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 26, color: C.jade, fontWeight: 800 }}>{novel.glyph}</span>
-      </div>
+      <CoverThumb novel={novel} size="sm" radius={8} />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontWeight: 700, fontSize: 14 }}>{novel.title}</div>
         <div style={{ fontSize: 11, color: C.textFaint, marginBottom: 4 }}>oleh {novel.author}</div>
@@ -1155,9 +1250,7 @@ function StoryDetailScreen({ novelId, ctx, onBack }) {
       />
       <div style={{ padding: 18 }}>
         <div style={{ display: "flex", gap: 14 }}>
-          <div style={{ width: 92, height: 124, borderRadius: 10, background: C.surfaceHi, border: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-            <span style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 46, color: C.jade, fontWeight: 800 }}>{novel.glyph}</span>
-          </div>
+          <CoverThumb novel={novel} size="lg" />
           <div style={{ flex: 1 }}>
             <div style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 18, lineHeight: 1.25 }}>{novel.title}</div>
             <div style={{ fontSize: 12, color: C.textFaint, marginTop: 4 }}>oleh {novel.author}</div>
@@ -1330,6 +1423,8 @@ function ReaderScreen({ novelId, chapterId, ctx, onBack }) {
   }
 
   function goTo(id) {
+    // Swap chapters in place — pushing here would mean every "next chapter"
+    // click adds another layer the reader has to back out of one-by-one.
     replace("reader", { novelId, chapterId: id });
   }
 
@@ -1618,9 +1713,7 @@ function StudioScreen({ ctx, onBack }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {mine.map((n) => (
             <div key={n.id} onClick={() => push("studioNovel", { novelId: n.id })} style={{ display: "flex", gap: 12, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 12, cursor: "pointer" }}>
-              <div style={{ width: 50, height: 66, borderRadius: 8, background: C.surfaceHi, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                <span style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 24, color: C.jade, fontWeight: 800 }}>{n.glyph}</span>
-              </div>
+              <CoverThumb novel={n} size="sm" radius={8} />
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 700, fontSize: 13.5 }}>{n.title}</div>
                 <div style={{ fontSize: 11, color: C.textFaint, marginTop: 3 }}>
@@ -1645,6 +1738,8 @@ function StudioNovelScreen({ novelId, ctx, onBack }) {
   const [synopsis, setSynopsis] = useState("");
   const [genre, setGenre] = useState(GENRES[0].label);
   const [glyph, setGlyph] = useState(GLYPHS[0]);
+  const [coverImage, setCoverImage] = useState(null);
+  const [uploadingCover, setUploadingCover] = useState(false);
   const [saving, setSaving] = useState(false);
 
   async function reload() {
@@ -1655,6 +1750,7 @@ function StudioNovelScreen({ novelId, ctx, onBack }) {
       setSynopsis(n.synopsis);
       setGenre(n.genre);
       setGlyph(n.glyph);
+      setCoverImage(n.coverImage || null);
       const chs = [];
       for (const cid of n.chapterIds) {
         const c = await gJSON(`chapter:${novelId}:${cid}`, true, null);
@@ -1668,9 +1764,22 @@ function StudioNovelScreen({ novelId, ctx, onBack }) {
     reload();
   }, [novelId]);
 
+  async function handleCoverChange(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setUploadingCover(true);
+    try {
+      const dataUrl = await fileToResizedDataURL(file);
+      setCoverImage(dataUrl);
+    } catch (err) {
+      ctx.showToast("Gagal memproses gambar. Coba file lain.");
+    }
+    setUploadingCover(false);
+  }
+
   async function handleSaveMeta() {
     setSaving(true);
-    const next = { ...novel, title, synopsis, genre, glyph };
+    const next = { ...novel, title, synopsis, genre, glyph, coverImage };
     await ctx.saveNovel(next);
     setNovel(next);
     setSaving(false);
@@ -1718,7 +1827,55 @@ function StudioNovelScreen({ novelId, ctx, onBack }) {
               ))}
             </select>
           </Field>
-          <Field label="Lambang Sampul">
+          <Field label="Sampul Cerita (Cover)">
+            <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
+              <div
+                style={{
+                  width: 84,
+                  height: 112,
+                  borderRadius: 10,
+                  border: `1px solid ${C.border}`,
+                  backgroundImage: coverImage ? `url("${coverImage}")` : "none",
+                  backgroundSize: "cover",
+                  backgroundPosition: "center",
+                  background: coverImage ? undefined : `linear-gradient(160deg, ${C.surfaceHi}, ${C.surface})`,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  flexShrink: 0,
+                }}
+              >
+                {!coverImage && <span style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 34, color: C.jade, fontWeight: 800 }}>{glyph}</span>}
+              </div>
+              <div style={{ flex: 1 }}>
+                <label
+                  style={{
+                    display: "inline-block",
+                    padding: "9px 16px",
+                    borderRadius: 999,
+                    border: `1.5px solid ${C.jade}`,
+                    color: C.jade,
+                    fontSize: 12.5,
+                    fontWeight: 700,
+                    cursor: "pointer",
+                  }}
+                >
+                  {uploadingCover ? "Memproses…" : coverImage ? "Ganti Foto" : "Upload Foto"}
+                  <input type="file" accept="image/*" onChange={handleCoverChange} style={{ display: "none" }} disabled={uploadingCover} />
+                </label>
+                {coverImage && (
+                  <button
+                    onClick={() => setCoverImage(null)}
+                    style={{ display: "block", marginTop: 8, background: "none", border: "none", color: C.textFaint, fontSize: 11.5, cursor: "pointer", textDecoration: "underline", padding: 0 }}
+                  >
+                    Hapus foto, pakai lambang saja
+                  </button>
+                )}
+                <div style={{ fontSize: 10.5, color: C.textFaint, marginTop: 8, lineHeight: 1.5 }}>JPG/PNG. Otomatis dipangkas & dikompres jadi ukuran sampul buku.</div>
+              </div>
+            </div>
+          </Field>
+          <Field label="Lambang Sampul (fallback bila tanpa foto)">
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               {GLYPHS.map((g) => (
                 <button key={g} onClick={() => setGlyph(g)} style={{ width: 40, height: 40, borderRadius: 10, border: `2px solid ${glyph === g ? C.jade : C.border}`, background: glyph === g ? C.jadeGlow : "transparent", color: C.text, fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 17, cursor: "pointer" }}>
