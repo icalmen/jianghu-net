@@ -327,8 +327,11 @@ function App() {
   const [ready, setReady] = useState(false);
   const [booting, setBooting] = useState(true);
 
+  // NOTE on naming: `username` holds the Firebase Auth UID once signed in
+  // (kept under this name to minimize changes across every screen that
+  // already does `if (!username)` / uses it as a storage-key). The public
+  // pen name people actually see is `user.displayName`.
   const [username, setUsername] = useState(null);
-  const [nameDraft, setNameDraft] = useState("");
   const [user, setUser] = useState(null);
 
   const [tab, setTab] = useState("home");
@@ -356,30 +359,50 @@ function App() {
     return () => clearTimeout(t);
   }, []);
 
+  // Firebase Auth persists the session itself (IndexedDB, "local"
+  // persistence by default) — no more manual localStorage bookkeeping for
+  // "who is this device logged in as".
   useEffect(() => {
-    (async () => {
-      const savedName = await sGet("me:username", false);
-      if (savedName) {
-        setUsername(savedName);
-        await loadUser(savedName);
+    const unsub = window.__jianghuAuth.onAuthStateChanged(async (fbUser) => {
+      if (fbUser) {
+        setUsername(fbUser.uid);
+        await loadUser(fbUser.uid, fbUser);
+      } else {
+        setUsername(null);
+        setUser(null);
       }
-      await loadCatalog();
       setBooting(false);
-    })();
+    });
+    return unsub;
   }, []);
 
-  async function loadUser(name) {
-    let u = await gJSON(`user:${name}`, true, null);
+  useEffect(() => {
+    loadCatalog();
+  }, []);
+
+  async function loadUser(uid, fbUser) {
+    let u = await gJSON(`user:${uid}`, true, null);
     if (!u) {
-      u = { username: name, stones: 200, tier: "luar", tierUntil: 0, chaptersRead: 0, badges: [], joinedAt: Date.now() };
-      await sJSON(`user:${name}`, u, true);
+      const fallbackName = (fbUser && fbUser.email ? fbUser.email.split("@")[0] : "Pendekar");
+      u = {
+        uid,
+        email: fbUser ? fbUser.email : null,
+        displayName: fallbackName,
+        stones: 200,
+        tier: "luar",
+        tierUntil: 0,
+        chaptersRead: 0,
+        badges: [],
+        joinedAt: Date.now(),
+      };
+      await sJSON(`user:${uid}`, u, true);
     }
     setUser(u);
     return u;
   }
   async function saveUser(next) {
     setUser(next);
-    await sJSON(`user:${next.username}`, next, true);
+    await sJSON(`user:${next.uid}`, next, true);
   }
 
   async function loadCatalog() {
@@ -395,18 +418,55 @@ function App() {
     setLoadingCatalog(false);
   }
 
-  async function doLogin() {
-    const name = nameDraft.trim();
-    if (!name) return;
-    setUsername(name);
-    await sSet("me:username", name, false);
-    await loadUser(name);
-    showToast(`Selamat datang di Jianghu, ${name}.`);
+  function authErrorMessage(e) {
+    const map = {
+      "auth/email-already-in-use": "Email ini sudah terdaftar. Coba masuk saja.",
+      "auth/invalid-email": "Format email tidak valid.",
+      "auth/weak-password": "Password minimal 6 karakter.",
+      "auth/user-not-found": "Email belum terdaftar. Daftar dulu, yuk.",
+      "auth/wrong-password": "Password salah.",
+      "auth/invalid-credential": "Email atau password salah.",
+      "auth/too-many-requests": "Terlalu banyak percobaan. Coba lagi beberapa saat lagi.",
+      "auth/network-request-failed": "Koneksi bermasalah. Cek internet kamu.",
+    };
+    return (e && map[e.code]) || "Terjadi kesalahan. Coba lagi.";
   }
+
+  async function doSignup(email, password, displayName) {
+    try {
+      const cred = await window.__jianghuAuth.createUserWithEmailAndPassword(email, password);
+      const uid = cred.user.uid;
+      const u = {
+        uid,
+        email,
+        displayName: displayName.trim() || email.split("@")[0],
+        stones: 200,
+        tier: "luar",
+        tierUntil: 0,
+        chaptersRead: 0,
+        badges: [],
+        joinedAt: Date.now(),
+      };
+      await sJSON(`user:${uid}`, u, true);
+      setUser(u);
+      showToast(`Selamat datang di Jianghu, ${u.displayName}!`);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: authErrorMessage(e) };
+    }
+  }
+
+  async function doLoginEmail(email, password) {
+    try {
+      await window.__jianghuAuth.signInWithEmailAndPassword(email, password);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: authErrorMessage(e) };
+    }
+  }
+
   function doLogout() {
-    setUsername(null);
-    setUser(null);
-    sSet("me:username", "", false);
+    window.__jianghuAuth.signOut();
     setTab("home");
     setStack([]);
   }
@@ -444,11 +504,15 @@ function App() {
       glyph,
       coverImage: coverImage || null,
       author: username,
+      authorName: (user && user.displayName) || "Pendekar",
       chapterIds: [],
       frameworks: [],
       characters: [],
       reads: 0,
       tips: 0,
+      ratingSum: 0,
+      ratingCount: 0,
+      commentCount: 0,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -464,7 +528,7 @@ function App() {
     await sJSON(`novel:${novel.id}`, novel, true);
     await loadCatalog();
   }
-  async function addChapter(novelId, { title, content, isPremium, coinPrice, blueprintType }) {
+  async function addChapter(novelId, { title, content, isPremium, coinPrice, blueprintType, status }) {
     const novel = await gJSON(`novel:${novelId}`, true, null);
     if (!novel) return;
     const id = uid("ch");
@@ -476,6 +540,7 @@ function App() {
       isPremium: !!isPremium,
       coinPrice: isPremium ? Number(coinPrice) || 15 : 0,
       blueprintType: blueprintType || "kosong",
+      status: status === "draft" ? "draft" : "published",
       order: novel.chapterIds.length + 1,
       createdAt: Date.now(),
     };
@@ -510,7 +575,7 @@ function App() {
       const key = `earnings:${novel.author}`;
       const earn = await gJSON(key, true, { total: 0, ledger: [] });
       earn.total += authorShare;
-      earn.ledger.unshift({ type: "paywall", novel: novel.title, chapter: chapter.title, reader: username, amount: authorShare, ts: Date.now() });
+      earn.ledger.unshift({ type: "paywall", novel: novel.title, chapter: chapter.title, reader: (user && user.displayName) || "Pembaca", amount: authorShare, ts: Date.now() });
       earn.ledger = earn.ledger.slice(0, 150);
       await sJSON(key, earn, true);
     }
@@ -547,16 +612,80 @@ function App() {
     novel.tips = (novel.tips || 0) + amount;
     await saveNovel(novel);
     const ledger = await gJSON("tips:ledger", true, []);
-    ledger.unshift({ novelId: novel.id, novelTitle: novel.title, author: novel.author, amount, from: username, ts: Date.now() });
+    ledger.unshift({ novelId: novel.id, novelTitle: novel.title, author: novel.author, authorName: novel.authorName, amount, from: username, fromName: (user && user.displayName) || "Pembaca", ts: Date.now() });
     await sJSON("tips:ledger", ledger.slice(0, 300), true);
     const key = `earnings:${novel.author}`;
     const earn = await gJSON(key, true, { total: 0, ledger: [] });
     const authorShare = Math.round(amount * 0.8);
     earn.total += authorShare;
-    earn.ledger.unshift({ type: "tip", novel: novel.title, chapter: "Pedang Pusaka / Pil Dewa", reader: username, amount: authorShare, ts: Date.now() });
+    earn.ledger.unshift({ type: "tip", novel: novel.title, chapter: "Pedang Pusaka / Pil Dewa", reader: (user && user.displayName) || "Pembaca", amount: authorShare, ts: Date.now() });
     earn.ledger = earn.ledger.slice(0, 150);
     await sJSON(key, earn, true);
     return true;
+  }
+
+  async function rateNovel(novel, stars) {
+    if (!requireLogin({ screen: "story", params: { novelId: novel.id } })) return false;
+    const rKey = `rating:${novel.id}:${username}`;
+    const prev = await gJSON(rKey, true, null);
+    let ratingSum = novel.ratingSum || 0;
+    let ratingCount = novel.ratingCount || 0;
+    if (prev) {
+      ratingSum = ratingSum - prev.stars + stars;
+    } else {
+      ratingSum += stars;
+      ratingCount += 1;
+    }
+    await sJSON(rKey, { uid: username, stars, ts: Date.now() }, true);
+    const nextNovel = { ...novel, ratingSum, ratingCount };
+    await saveNovel(nextNovel);
+    return nextNovel;
+  }
+  async function getMyRating(novelId) {
+    if (!username) return 0;
+    const r = await gJSON(`rating:${novelId}:${username}`, true, null);
+    return r ? r.stars : 0;
+  }
+
+  async function loadComments(novelId) {
+    const c = await gJSON(`comments:${novelId}`, true, { list: [] });
+    return c.list || [];
+  }
+  async function addComment(novel, text) {
+    if (!requireLogin({ screen: "story", params: { novelId: novel.id } })) return false;
+    const key = `comments:${novel.id}`;
+    const c = await gJSON(key, true, { list: [] });
+    const entry = { id: uid("cmt"), uid: username, displayName: (user && user.displayName) || "Pembaca", text: text.trim(), ts: Date.now() };
+    c.list = [entry, ...(c.list || [])].slice(0, 300);
+    await sJSON(key, c, true);
+    const nextNovel = { ...novel, commentCount: (novel.commentCount || 0) + 1 };
+    await saveNovel(nextNovel);
+    return { novel: nextNovel, comments: c.list };
+  }
+  async function deleteComment(novel, commentId) {
+    const key = `comments:${novel.id}`;
+    const c = await gJSON(key, true, { list: [] });
+    c.list = (c.list || []).filter((x) => x.id !== commentId);
+    await sJSON(key, c, true);
+    const nextNovel = { ...novel, commentCount: Math.max(0, (novel.commentCount || 1) - 1) };
+    await saveNovel(nextNovel);
+    return { novel: nextNovel, comments: c.list };
+  }
+
+  async function deleteChapter(novel, chapterId) {
+    const nextNovel = { ...novel, chapterIds: novel.chapterIds.filter((id) => id !== chapterId) };
+    await saveNovel(nextNovel);
+    return nextNovel;
+  }
+  async function deleteNovel(novelId) {
+    const ids = await gJSON("catalog:index", true, []);
+    await sJSON("catalog:index", ids.filter((id) => id !== novelId), true);
+    await loadCatalog();
+  }
+  async function setChapterStatus(chapter, status) {
+    const next = { ...chapter, status };
+    await updateChapter(next);
+    return next;
   }
 
   async function toggleLibrary(novelId) {
@@ -602,6 +731,8 @@ function App() {
     pop,
     replace,
     requireLogin,
+    doSignup,
+    doLoginEmail,
     createNovel,
     saveNovel,
     addChapter,
@@ -611,6 +742,14 @@ function App() {
     buyStones,
     purchaseTier,
     tipNovel,
+    rateNovel,
+    getMyRating,
+    loadComments,
+    addComment,
+    deleteComment,
+    deleteChapter,
+    deleteNovel,
+    setChapterStatus,
     toggleLibrary,
     markProgress,
     loadCatalog,
@@ -623,7 +762,7 @@ function App() {
       <GlobalStyle />
       <div style={{ width: "100%", maxWidth: 480, position: "relative", minHeight: "100vh", background: C.bg }}>
         {current ? (
-          <ScreenRouter entry={current} ctx={ctx} onBack={pop} nameDraft={nameDraft} setNameDraft={setNameDraft} doLogin={doLogin} />
+          <ScreenRouter entry={current} ctx={ctx} onBack={pop} />
         ) : (
           <MainTabs tab={tab} setTab={setTab} ctx={ctx} username={username} doLogout={doLogout} />
         )}
@@ -727,20 +866,21 @@ function BottomNav({ tab, setTab }) {
   );
 }
 
-function ScreenRouter({ entry, ctx, onBack, nameDraft, setNameDraft, doLogin }) {
+function ScreenRouter({ entry, ctx, onBack }) {
   const { screen, params } = entry;
   return (
     <div style={{ minHeight: "100vh" }}>
       {screen === "story" && <StoryDetailScreen novelId={params.novelId} ctx={ctx} onBack={onBack} />}
       {screen === "reader" && <ReaderScreen novelId={params.novelId} chapterId={params.chapterId} ctx={ctx} onBack={onBack} />}
       {screen === "wallet" && <WalletScreen ctx={ctx} onBack={onBack} />}
-      {screen === "login" && <LoginScreen ctx={ctx} onBack={onBack} nameDraft={nameDraft} setNameDraft={setNameDraft} doLogin={doLogin} params={params} />}
+      {screen === "login" && <LoginScreen ctx={ctx} onBack={onBack} params={params} />}
       {screen === "studio" && <StudioScreen ctx={ctx} onBack={onBack} />}
       {screen === "studioNovel" && <StudioNovelScreen novelId={params.novelId} ctx={ctx} onBack={onBack} />}
       {screen === "chapterEditor" && <ChapterEditorScreen novelId={params.novelId} chapterId={params.chapterId} ctx={ctx} onBack={onBack} />}
       {screen === "characterEditor" && <CharacterEditorScreen novelId={params.novelId} characterId={params.characterId} ctx={ctx} onBack={onBack} />}
       {screen === "powerSystem" && <PowerSystemScreen novelId={params.novelId} ctx={ctx} onBack={onBack} />}
       {screen === "distribution" && <DistributionScreen novelId={params.novelId} ctx={ctx} onBack={onBack} />}
+      {screen === "legal" && <LegalScreen onBack={onBack} />}
     </div>
   );
 }
@@ -799,6 +939,7 @@ function Field({ label, children }) {
 function HomeScreen({ ctx }) {
   const { novels, loadingCatalog, push } = ctx;
   const [heroIdx, setHeroIdx] = useState(0);
+  const [search, setSearch] = useState("");
   const hero = novels.slice(0, 5);
 
   useEffect(() => {
@@ -811,6 +952,11 @@ function HomeScreen({ ctx }) {
   const pendatangBaru = [...novels].sort((a, b) => b.createdAt - a.createdAt).slice(0, 6);
   const terlaris = [...novels].sort((a, b) => (b.reads || 0) - (a.reads || 0)).slice(0, 6);
 
+  const q = search.trim().toLowerCase();
+  const searchResults = q
+    ? novels.filter((n) => n.title.toLowerCase().includes(q) || (n.authorName || "").toLowerCase().includes(q) || (n.genre || "").toLowerCase().includes(q))
+    : [];
+
   return (
     <div>
       <FloatingParticles />
@@ -822,65 +968,98 @@ function HomeScreen({ ctx }) {
             <div style={{ fontSize: 10, letterSpacing: 1.8, color: C.textFaint, textTransform: "uppercase" }}>Dunia Persilatan</div>
           </div>
         </div>
+        <div style={{ position: "relative", marginTop: 14 }}>
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Cari judul, penulis, atau aliran…"
+            style={{ ...inputStyle(), paddingLeft: 34 }}
+          />
+          <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: C.textFaint }}>🔍</span>
+          {search && (
+            <button
+              onClick={() => setSearch("")}
+              style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: C.textFaint, fontSize: 15, cursor: "pointer" }}
+            >
+              ✕
+            </button>
+          )}
+        </div>
       </div>
 
-      {hero.length > 0 && (
-        <div
-          onClick={() => push("story", { novelId: hero[heroIdx].id })}
-          style={{
-            margin: "14px 18px 0",
-            height: 170,
-            borderRadius: 16,
-            position: "relative",
-            overflow: "hidden",
-            cursor: "pointer",
-            background: hero[heroIdx].coverImage
-              ? `url("${hero[heroIdx].coverImage}") center/cover`
-              : `linear-gradient(135deg, ${C.jadeDeep} 0%, #0c1f16 60%, ${C.bg} 100%)`,
-            border: `1px solid ${C.border}`,
-          }}
-        >
-          {!hero[heroIdx].coverImage && (
-            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "flex-end", paddingRight: 18, opacity: 0.16 }}>
-              <span style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 120, color: C.gold, fontWeight: 900 }}>{hero[heroIdx].glyph}</span>
-            </div>
-          )}
-          <div
-            style={{
-              position: "absolute",
-              inset: 0,
-              padding: 18,
-              display: "flex",
-              flexDirection: "column",
-              justifyContent: "flex-end",
-              background: hero[heroIdx].coverImage ? "linear-gradient(180deg, transparent 40%, rgba(0,0,0,0.75) 100%)" : "none",
-            }}
-          >
-            <div style={{ fontSize: 10, letterSpacing: 1.5, color: C.gold, fontWeight: 700, textTransform: "uppercase" }}>Novel Unggulan</div>
-            <div style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 19, marginTop: 4 }}>{hero[heroIdx].title}</div>
-            <div style={{ fontSize: 11.5, color: C.textSoft, marginTop: 2 }}>oleh {hero[heroIdx].author}</div>
+      {q ? (
+        <div style={{ padding: "14px 18px 24px" }}>
+          <div style={{ fontSize: 12, color: C.textFaint, marginBottom: 12 }}>
+            {searchResults.length} hasil untuk "{search.trim()}"
           </div>
-          <div style={{ position: "absolute", bottom: 10, right: 14, display: "flex", gap: 5 }}>
-            {hero.map((_, i) => (
-              <div key={i} style={{ width: i === heroIdx ? 16 : 6, height: 4, borderRadius: 999, background: i === heroIdx ? C.gold : "rgba(255,255,255,0.3)", transition: "width .2s" }} />
+          {searchResults.length === 0 && <div style={{ fontSize: 13, color: C.textSoft, textAlign: "center", padding: "30px 0" }}>Tidak ada cerita yang cocok. Coba kata kunci lain.</div>}
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {searchResults.map((n) => (
+              <NovelListCard key={n.id} novel={n} onOpen={() => push("story", { novelId: n.id })} />
             ))}
           </div>
         </div>
+      ) : (
+        <>
+          {hero.length > 0 && (
+            <div
+              onClick={() => push("story", { novelId: hero[heroIdx].id })}
+              style={{
+                margin: "14px 18px 0",
+                height: 170,
+                borderRadius: 16,
+                position: "relative",
+                overflow: "hidden",
+                cursor: "pointer",
+                background: hero[heroIdx].coverImage
+                  ? `url("${hero[heroIdx].coverImage}") center/cover`
+                  : `linear-gradient(135deg, ${C.jadeDeep} 0%, #0c1f16 60%, ${C.bg} 100%)`,
+                border: `1px solid ${C.border}`,
+              }}
+            >
+              {!hero[heroIdx].coverImage && (
+                <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "flex-end", paddingRight: 18, opacity: 0.16 }}>
+                  <span style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 120, color: C.gold, fontWeight: 900 }}>{hero[heroIdx].glyph}</span>
+                </div>
+              )}
+              <div
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  padding: 18,
+                  display: "flex",
+                  flexDirection: "column",
+                  justifyContent: "flex-end",
+                  background: hero[heroIdx].coverImage ? "linear-gradient(180deg, transparent 40%, rgba(0,0,0,0.75) 100%)" : "none",
+                }}
+              >
+                <div style={{ fontSize: 10, letterSpacing: 1.5, color: C.gold, fontWeight: 700, textTransform: "uppercase" }}>Novel Unggulan</div>
+                <div style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 19, marginTop: 4 }}>{hero[heroIdx].title}</div>
+                <div style={{ fontSize: 11.5, color: C.textSoft, marginTop: 2 }}>oleh {hero[heroIdx].authorName}</div>
+              </div>
+              <div style={{ position: "absolute", bottom: 10, right: 14, display: "flex", gap: 5 }}>
+                {hero.map((_, i) => (
+                  <div key={i} style={{ width: i === heroIdx ? 16 : 6, height: 4, borderRadius: 999, background: i === heroIdx ? C.gold : "rgba(255,255,255,0.3)", transition: "width .2s" }} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {loadingCatalog && <div style={{ padding: 24, color: C.textFaint, fontSize: 13 }}>Membaca gulungan takdir…</div>}
+
+          {!loadingCatalog && novels.length === 0 && (
+            <div style={{ textAlign: "center", padding: "50px 24px", color: C.textSoft, fontSize: 13, lineHeight: 1.7 }}>
+              Jianghu ini masih sunyi.
+              <br />
+              Jadilah pendekar pertama yang menuliskan kisahnya di Ruang Meditasi.
+            </div>
+          )}
+
+          {tetua.length > 0 && <NovelRow title="Rekomendasi Tetua" subtitle="Curated pick dari sesepuh sekte" novels={tetua} ctx={ctx} />}
+          {pendatangBaru.length > 0 && <NovelRow title="Pakar Pendatang Baru" subtitle="Karya terbaru di Jianghu" novels={pendatangBaru} ctx={ctx} />}
+          {terlaris.length > 0 && <NovelRow title="Kitab Terlaris" subtitle="Paling banyak dibaca pendekar" novels={terlaris} ctx={ctx} />}
+        </>
       )}
-
-      {loadingCatalog && <div style={{ padding: 24, color: C.textFaint, fontSize: 13 }}>Membaca gulungan takdir…</div>}
-
-      {!loadingCatalog && novels.length === 0 && (
-        <div style={{ textAlign: "center", padding: "50px 24px", color: C.textSoft, fontSize: 13, lineHeight: 1.7 }}>
-          Jianghu ini masih sunyi.
-          <br />
-          Jadilah pendekar pertama yang menuliskan kisahnya di Ruang Meditasi.
-        </div>
-      )}
-
-      {tetua.length > 0 && <NovelRow title="Rekomendasi Tetua" subtitle="Curated pick dari sesepuh sekte" novels={tetua} ctx={ctx} />}
-      {pendatangBaru.length > 0 && <NovelRow title="Pakar Pendatang Baru" subtitle="Karya terbaru di Jianghu" novels={pendatangBaru} ctx={ctx} />}
-      {terlaris.length > 0 && <NovelRow title="Kitab Terlaris" subtitle="Paling banyak dibaca pendekar" novels={terlaris} ctx={ctx} />}
     </div>
   );
 }
@@ -977,7 +1156,7 @@ function NovelListCard({ novel, onOpen }) {
       <CoverThumb novel={novel} size="sm" radius={8} />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontWeight: 700, fontSize: 14 }}>{novel.title}</div>
-        <div style={{ fontSize: 11, color: C.textFaint, marginBottom: 4 }}>oleh {novel.author}</div>
+        <div style={{ fontSize: 11, color: C.textFaint, marginBottom: 4 }}>oleh {novel.authorName}</div>
         <div style={{ fontSize: 11.5, color: C.textSoft, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", lineHeight: 1.4 }}>{novel.synopsis}</div>
       </div>
     </div>
@@ -1085,7 +1264,7 @@ function LeaderboardScreen({ ctx }) {
       const totals = {};
       for (const t of ledger) {
         if (t.ts < cutoff) continue;
-        if (!totals[t.novelId]) totals[t.novelId] = { novelId: t.novelId, title: t.novelTitle, author: t.author, amount: 0 };
+        if (!totals[t.novelId]) totals[t.novelId] = { novelId: t.novelId, title: t.novelTitle, author: t.authorName || t.author, amount: 0 };
         totals[t.novelId].amount += t.amount;
       }
       setRanking(Object.values(totals).sort((a, b) => b.amount - a.amount).slice(0, 20));
@@ -1136,15 +1315,17 @@ function ProfileScreen({ ctx, username, doLogout }) {
 
   const tierInfo = TIERS.find((t) => t.id === user.tier) || TIERS[0];
   const tierActive = user.tierUntil > Date.now() && user.tier !== "luar";
+  const displayName = user.displayName || "Pendekar";
 
   return (
     <div style={{ padding: 18 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 18 }}>
         <div style={{ width: 58, height: 58, borderRadius: "50%", background: C.jadeGlow, border: `2px solid ${C.jade}`, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 22, color: C.jade }}>
-          {username[0].toUpperCase()}
+          {displayName[0].toUpperCase()}
         </div>
         <div>
-          <div style={{ fontWeight: 800, fontSize: 17 }}>{username}</div>
+          <div style={{ fontWeight: 800, fontSize: 17 }}>{displayName}</div>
+          {user.email && <div style={{ fontSize: 11, color: C.textFaint, marginTop: 1 }}>{user.email}</div>}
           <div style={{ fontSize: 11.5, color: tierActive ? C.gold : C.textFaint, fontWeight: 700, marginTop: 2 }}>
             {tierActive ? "✦ " : ""}
             {tierInfo.label}
@@ -1170,6 +1351,7 @@ function ProfileScreen({ ctx, username, doLogout }) {
 
       <MenuRow label="Dompet & Langganan Tier" onClick={() => push("wallet", {})} />
       <MenuRow label="Ruang Meditasi (Studio Penulis)" onClick={() => push("studio", {})} />
+      <MenuRow label="Kebijakan Privasi & Ketentuan" onClick={() => push("legal", {})} />
 
       <button onClick={doLogout} style={{ width: "100%", marginTop: 22, padding: "12px 0", borderRadius: 10, border: `1.5px solid ${C.danger}`, background: "transparent", color: C.danger, fontWeight: 700, fontSize: 13.5, cursor: "pointer" }}>
         Keluar dari Jianghu
@@ -1190,21 +1372,26 @@ function MenuRow({ label, value, onClick }) {
    STORY DETAIL
 ================================================================ */
 function StoryDetailScreen({ novelId, ctx, onBack }) {
-  const { push, toggleLibrary, username, tipNovel, showToast } = ctx;
+  const { push, toggleLibrary, username, tipNovel, rateNovel, getMyRating, loadComments, addComment, deleteComment, showToast } = ctx;
   const [novel, setNovel] = useState(null);
   const [chapters, setChapters] = useState([]);
   const [inLib, setInLib] = useState(false);
   const [unlockedMap, setUnlockedMap] = useState({});
   const [tipping, setTipping] = useState(false);
+  const [myRating, setMyRating] = useState(0);
+  const [comments, setComments] = useState([]);
+  const [commentText, setCommentText] = useState("");
+  const [postingComment, setPostingComment] = useState(false);
 
   async function reload() {
     const n = await gJSON(`novel:${novelId}`, true, null);
     setNovel(n);
     if (n) {
+      const isAuthorNow = username === n.author;
       const chs = [];
       for (const cid of n.chapterIds) {
         const c = await gJSON(`chapter:${novelId}:${cid}`, true, null);
-        if (c) chs.push(c);
+        if (c && (isAuthorNow || c.status !== "draft")) chs.push(c);
       }
       chs.sort((a, b) => a.order - b.order);
       setChapters(chs);
@@ -1212,9 +1399,11 @@ function StoryDetailScreen({ novelId, ctx, onBack }) {
         const map = {};
         for (const c of chs) if (c.isPremium) map[c.id] = !!(await sGet(`unlock:${username}:${novelId}:${c.id}`, false));
         setUnlockedMap(map);
+        setMyRating(await getMyRating(novelId));
       }
       const lib = await gJSON(`library:${username || "_"}`, false, []);
       setInLib(lib.includes(novelId));
+      setComments(await loadComments(novelId));
     }
   }
   useEffect(() => {
@@ -1223,6 +1412,7 @@ function StoryDetailScreen({ novelId, ctx, onBack }) {
 
   if (!novel) return <TopBar title="Memuat…" onBack={onBack} />;
   const isAuthor = username === novel.author;
+  const avgRating = novel.ratingCount ? (novel.ratingSum / novel.ratingCount).toFixed(1) : null;
 
   async function handleTip(amount) {
     setTipping(true);
@@ -1232,6 +1422,39 @@ function StoryDetailScreen({ novelId, ctx, onBack }) {
     else if (r === true) {
       showToast(`Kamu mempersembahkan ${amount} Batu Spiritual!`);
       reload();
+    }
+  }
+
+  async function handleRate(stars) {
+    const next = await rateNovel(novel, stars);
+    if (next) {
+      setNovel(next);
+      setMyRating(stars);
+      showToast("Terima kasih atas penilaianmu!");
+    }
+  }
+
+  async function handlePostComment() {
+    if (!username) {
+      push("login", { after: { screen: "story", params: { novelId } } });
+      return;
+    }
+    if (!commentText.trim()) return;
+    setPostingComment(true);
+    const r = await addComment(novel, commentText);
+    setPostingComment(false);
+    if (r) {
+      setNovel(r.novel);
+      setComments(r.comments);
+      setCommentText("");
+    }
+  }
+
+  async function handleDeleteComment(commentId) {
+    const r = await deleteComment(novel, commentId);
+    if (r) {
+      setNovel(r.novel);
+      setComments(r.comments);
     }
   }
 
@@ -1253,15 +1476,35 @@ function StoryDetailScreen({ novelId, ctx, onBack }) {
           <CoverThumb novel={novel} size="lg" />
           <div style={{ flex: 1 }}>
             <div style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 18, lineHeight: 1.25 }}>{novel.title}</div>
-            <div style={{ fontSize: 12, color: C.textFaint, marginTop: 4 }}>oleh {novel.author}</div>
+            <div style={{ fontSize: 12, color: C.textFaint, marginTop: 4 }}>oleh {novel.authorName}</div>
             <div style={{ fontSize: 11.5, color: C.textSoft, marginTop: 8 }}>
               {chapters.length} bab · {novel.reads || 0}x dibaca · {fmt(novel.tips || 0)} 💎 diterima
             </div>
+            {avgRating && (
+              <div style={{ fontSize: 11.5, color: C.gold, marginTop: 4, fontWeight: 700 }}>
+                ⭐ {avgRating} ({novel.ratingCount} rating)
+              </div>
+            )}
           </div>
         </div>
 
         <BambooDivider />
         <div style={{ fontSize: 13.5, lineHeight: 1.7, marginTop: 8 }}>{novel.synopsis}</div>
+
+        <div style={{ marginTop: 14 }}>
+          <div style={{ fontSize: 11.5, fontWeight: 700, color: C.textSoft, marginBottom: 6 }}>{myRating ? "Penilaianmu" : "Beri Penilaian"}</div>
+          <div style={{ display: "flex", gap: 6 }}>
+            {[1, 2, 3, 4, 5].map((s) => (
+              <button
+                key={s}
+                onClick={() => handleRate(s)}
+                style={{ background: "none", border: "none", fontSize: 22, cursor: "pointer", padding: 0, opacity: s <= myRating ? 1 : 0.3, filter: s <= myRating ? "none" : "grayscale(1)" }}
+              >
+                ⭐
+              </button>
+            ))}
+          </div>
+        </div>
 
         <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
           <button
@@ -1298,11 +1541,53 @@ function StoryDetailScreen({ novelId, ctx, onBack }) {
                   <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
                     <span style={{ fontSize: 11.5, color: C.textFaint, fontFamily: "'IBM Plex Mono', monospace" }}>{String(c.order).padStart(2, "0")}</span>
                     <span style={{ fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.title}</span>
+                    {c.status === "draft" && (
+                      <span style={{ fontSize: 9.5, background: C.goldGlow, color: C.gold, padding: "2px 7px", borderRadius: 999, fontWeight: 700, flexShrink: 0 }}>DRAFT</span>
+                    )}
                   </div>
                   {c.isPremium ? locked ? <GiokLock size={22} tone="gold" /> : <GiokLock size={22} broken tone="jade" /> : <span style={{ fontSize: 10, color: C.jade, fontWeight: 700 }}>GRATIS</span>}
                 </div>
               );
             })}
+          </div>
+        </div>
+
+        <div style={{ marginTop: 28 }}>
+          <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>Komentar ({comments.length})</div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+            <input
+              value={commentText}
+              onChange={(e) => setCommentText(e.target.value)}
+              placeholder={username ? "Tulis komentar…" : "Masuk dulu untuk berkomentar"}
+              style={{ ...inputStyle(), flex: 1 }}
+              onKeyDown={(e) => e.key === "Enter" && handlePostComment()}
+            />
+            <button
+              onClick={handlePostComment}
+              disabled={postingComment}
+              style={{ padding: "0 16px", borderRadius: 10, border: "none", background: C.jade, color: "#08170f", fontWeight: 700, fontSize: 13, cursor: "pointer" }}
+            >
+              Kirim
+            </button>
+          </div>
+          {comments.length === 0 && <div style={{ fontSize: 12.5, color: C.textFaint, textAlign: "center", padding: "12px 0" }}>Belum ada komentar. Jadilah yang pertama.</div>}
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {comments.map((cm) => (
+              <div key={cm.id} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 12px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 700 }}>{cm.displayName}</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 10, color: C.textFaint }}>{timeAgo(cm.ts)}</span>
+                    {(cm.uid === username || isAuthor) && (
+                      <button onClick={() => handleDeleteComment(cm.id)} style={{ background: "none", border: "none", color: C.textFaint, fontSize: 11, cursor: "pointer", padding: 0 }}>
+                        Hapus
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div style={{ fontSize: 12.5, marginTop: 4, lineHeight: 1.5 }}>{cm.text}</div>
+              </div>
+            ))}
           </div>
         </div>
       </div>
@@ -1663,24 +1948,126 @@ function EmptyState({ ctx, title, body, cta, onCta }) {
 }
 
 /* ================================================================
-   LOGIN
+   LEGAL — Privacy Policy & Terms
 ================================================================ */
-function LoginScreen({ ctx, onBack, nameDraft, setNameDraft, doLogin, params }) {
-  function submit() {
-    doLogin();
+function LegalScreen({ onBack }) {
+  return (
+    <div>
+      <TopBar title="Kebijakan Privasi & Ketentuan" onBack={onBack} />
+      <div style={{ padding: 20, fontSize: 13, lineHeight: 1.75, color: C.text }}>
+        <div style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 16, marginBottom: 4 }}>Kebijakan Privasi</div>
+        <div style={{ fontSize: 11, color: C.textFaint, marginBottom: 14 }}>Terakhir diperbarui: {new Date().toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric" })}</div>
+
+        <p><b>Data yang kami simpan:</b> email dan password (dikelola aman oleh Firebase Authentication, kami tidak pernah melihat password kamu dalam bentuk asli), nama pena, progres bacaan, cerita dan bab yang kamu tulis, saldo Batu Spiritual, serta riwayat transaksi di dalam aplikasi.</p>
+
+        <p><b>Siapa yang bisa melihat data:</b> Nama pena, cerita, bab, komentar, dan rating bersifat publik dan bisa dilihat semua pengguna. Email dan riwayat transaksi bersifat privat.</p>
+
+        <p><b>Pembayaran:</b> Fitur isi ulang Batu Spiritual dan langganan tier saat ini bersifat simulasi untuk pengujian aplikasi. Belum ada uang sungguhan yang diproses. Bila di masa depan pembayaran sungguhan diaktifkan, kebijakan ini akan diperbarui.</p>
+
+        <p><b>Penghapusan akun:</b> Hubungi pengembang aplikasi untuk permintaan penghapusan akun dan data terkait.</p>
+
+        <BambooDivider />
+
+        <div style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 16, margin: "18px 0 4px" }}>Ketentuan Layanan</div>
+
+        <p><b>Konten yang dilarang:</b> Konten yang melanggar hukum, plagiarisme, ujaran kebencian, atau pelecehan tidak diperbolehkan. Kami berhak menghapus konten yang melanggar tanpa pemberitahuan.</p>
+
+        <p><b>Hak cipta:</b> Penulis tetap memegang hak cipta atas karya yang diterbitkan. Dengan menerbitkan di platform ini, kamu memberi izin bagi pembaca terdaftar untuk membaca karyamu sesuai pengaturan gratis/premium yang kamu tetapkan sendiri.</p>
+
+        <p><b>Pendapatan penulis:</b> Bagi hasil 70% (pembukaan bab premium) dan 80% (persembahan/tip) untuk penulis bersifat ilustratif dalam versi pengujian ini dan belum melibatkan pencairan dana sungguhan.</p>
+
+        <p><b>Tanggung jawab pengguna:</b> Kamu bertanggung jawab penuh atas konten yang kamu terbitkan dan komentar yang kamu tulis.</p>
+
+        <p style={{ marginTop: 18, color: C.textFaint, fontSize: 11.5 }}>Aplikasi ini adalah produk dalam tahap pengembangan. Ketentuan dapat berubah sewaktu-waktu.</p>
+      </div>
+    </div>
+  );
+}
+
+/* ================================================================
+   LOGIN / SIGNUP
+================================================================ */
+function LoginScreen({ ctx, onBack, params }) {
+  const [mode, setMode] = useState("login"); // 'login' | 'signup'
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit() {
+    setError("");
+    if (!email.trim() || !password.trim()) {
+      setError("Isi email dan password dulu.");
+      return;
+    }
+    if (mode === "signup" && !displayName.trim()) {
+      setError("Isi nama pena dulu.");
+      return;
+    }
+    setBusy(true);
+    const r =
+      mode === "signup" ? await ctx.doSignup(email.trim(), password, displayName) : await ctx.doLoginEmail(email.trim(), password);
+    setBusy(false);
+    if (!r.ok) {
+      setError(r.error);
+      return;
+    }
     onBack();
     if (params && params.after) ctx.push(params.after.screen, params.after.params);
   }
+
   return (
     <div>
-      <TopBar title="Masuk" onBack={onBack} />
-      <div style={{ padding: 24, textAlign: "center" }}>
-        <span style={{ fontFamily: "'Ma Shan Zheng', serif", fontSize: 50, color: C.jade }}>俠</span>
-        <div style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 18, marginTop: 14 }}>Masuki Jianghu</div>
-        <div style={{ fontSize: 12, color: C.textSoft, marginTop: 6, lineHeight: 1.6 }}>Cukup pakai nama pena — tanpa kata sandi. Ini demo, jangan pakai identitas rahasiamu.</div>
-        <input value={nameDraft} onChange={(e) => setNameDraft(e.target.value)} placeholder="Nama pena kamu…" style={{ ...inputStyle(), textAlign: "center", marginTop: 20, fontSize: 15 }} onKeyDown={(e) => e.key === "Enter" && submit()} />
-        <button onClick={submit} disabled={!nameDraft.trim()} style={{ width: "100%", marginTop: 14, padding: "13px 0", borderRadius: 10, border: "none", background: C.jade, color: "#08170f", fontWeight: 700, fontSize: 14, cursor: "pointer", opacity: nameDraft.trim() ? 1 : 0.6 }}>
-          Masuk
+      <TopBar title={mode === "signup" ? "Daftar Akun" : "Masuk"} onBack={onBack} />
+      <div style={{ padding: 24 }}>
+        <div style={{ textAlign: "center", marginBottom: 22 }}>
+          <span style={{ fontFamily: "'Ma Shan Zheng', serif", fontSize: 50, color: C.jade }}>俠</span>
+          <div style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 18, marginTop: 10 }}>
+            {mode === "signup" ? "Daftar ke Jianghu-Net" : "Masuki Jianghu"}
+          </div>
+          <div style={{ fontSize: 12, color: C.textSoft, marginTop: 6, lineHeight: 1.6 }}>
+            {mode === "signup" ? "Nama pena akan tampil ke pembaca lain. Email & password dipakai untuk masuk kembali." : "Masuk dengan email dan password yang sudah kamu daftarkan."}
+          </div>
+        </div>
+
+        {mode === "signup" && (
+          <Field label="Nama Pena">
+            <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Contoh: Pendekar Angin Utara" style={inputStyle()} />
+          </Field>
+        )}
+        <Field label="Email">
+          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="nama@email.com" style={inputStyle()} />
+        </Field>
+        <Field label="Password">
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder={mode === "signup" ? "Minimal 6 karakter" : "Password kamu"}
+            style={inputStyle()}
+            onKeyDown={(e) => e.key === "Enter" && submit()}
+          />
+        </Field>
+
+        {error && <div style={{ color: C.danger, fontSize: 12.5, marginBottom: 12, lineHeight: 1.5 }}>{error}</div>}
+
+        <button
+          onClick={submit}
+          disabled={busy}
+          style={{ width: "100%", padding: "13px 0", borderRadius: 10, border: "none", background: C.jade, color: "#08170f", fontWeight: 700, fontSize: 14, cursor: "pointer", opacity: busy ? 0.7 : 1 }}
+        >
+          {busy ? "Memproses…" : mode === "signup" ? "Daftar" : "Masuk"}
+        </button>
+
+        <button
+          onClick={() => {
+            setMode(mode === "signup" ? "login" : "signup");
+            setError("");
+          }}
+          style={{ width: "100%", marginTop: 14, background: "none", border: "none", color: C.textSoft, fontSize: 12.5, cursor: "pointer", textDecoration: "underline" }}
+        >
+          {mode === "signup" ? "Sudah punya akun? Masuk di sini" : "Belum punya akun? Daftar di sini"}
         </button>
       </div>
     </div>
@@ -1894,16 +2281,59 @@ function StudioNovelScreen({ novelId, ctx, onBack }) {
               + Tambah Bab
             </button>
           </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 28 }}>
             {chapters.map((c) => (
-              <div key={c.id} onClick={() => push("chapterEditor", { novelId, chapterId: c.id })} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "11px 14px", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, cursor: "pointer" }}>
-                <span style={{ fontSize: 13, fontWeight: 600 }}>
-                  {c.order}. {c.title}
-                </span>
-                <span style={{ fontSize: 10.5, color: c.isPremium ? C.gold : C.jade, fontWeight: 700 }}>{c.isPremium ? `${c.coinPrice} 💎` : "GRATIS"}</span>
+              <div key={c.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "11px 14px", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10 }}>
+                <div onClick={() => push("chapterEditor", { novelId, chapterId: c.id })} style={{ flex: 1, cursor: "pointer", minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {c.order}. {c.title}
+                    </span>
+                    {c.status === "draft" && <span style={{ fontSize: 9, background: C.goldGlow, color: C.gold, padding: "1px 6px", borderRadius: 999, fontWeight: 700, flexShrink: 0 }}>DRAFT</span>}
+                  </div>
+                  <span style={{ fontSize: 10.5, color: c.isPremium ? C.gold : C.jade, fontWeight: 700 }}>{c.isPremium ? `${c.coinPrice} 💎` : "GRATIS"}</span>
+                </div>
+                <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                  <button
+                    onClick={async () => {
+                      const next = await ctx.setChapterStatus(c, c.status === "draft" ? "published" : "draft");
+                      setChapters((prev) => prev.map((x) => (x.id === next.id ? next : x)));
+                    }}
+                    style={{ border: `1px solid ${C.border}`, background: "transparent", color: C.textSoft, borderRadius: 8, padding: "5px 8px", fontSize: 10.5, cursor: "pointer" }}
+                  >
+                    {c.status === "draft" ? "Terbitkan" : "Jadikan Draft"}
+                  </button>
+                  <button
+                    onClick={async () => {
+                      if (!window.confirm(`Hapus bab "${c.title}"? Tindakan ini tidak bisa dibatalkan.`)) return;
+                      const next = await ctx.deleteChapter(novel, c.id);
+                      setNovel(next);
+                      setChapters((prev) => prev.filter((x) => x.id !== c.id));
+                    }}
+                    style={{ border: `1px solid ${C.danger}`, background: "transparent", color: C.danger, borderRadius: 8, padding: "5px 8px", fontSize: 10.5, cursor: "pointer" }}
+                  >
+                    Hapus
+                  </button>
+                </div>
               </div>
             ))}
             {chapters.length === 0 && <div style={{ fontSize: 12.5, color: C.textFaint }}>Belum ada bab.</div>}
+          </div>
+
+          <div style={{ border: `1.5px solid ${C.danger}`, borderRadius: 12, padding: 16 }}>
+            <div style={{ fontWeight: 700, fontSize: 13, color: C.danger, marginBottom: 6 }}>Zona Berbahaya</div>
+            <div style={{ fontSize: 11.5, color: C.textSoft, marginBottom: 12, lineHeight: 1.5 }}>Menghapus kitab akan menyembunyikannya dari katalog secara permanen, termasuk seluruh babnya.</div>
+            <button
+              onClick={async () => {
+                if (!window.confirm(`Hapus seluruh kitab "${novel.title}"? Tindakan ini tidak bisa dibatalkan.`)) return;
+                await ctx.deleteNovel(novel.id);
+                ctx.showToast("Kitab telah dihapus.");
+                onBack();
+              }}
+              style={{ width: "100%", padding: "10px 0", borderRadius: 10, border: "none", background: C.danger, color: "#fff", fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}
+            >
+              Hapus Kitab Ini
+            </button>
           </div>
         </div>
       )}
@@ -2249,6 +2679,7 @@ function ChapterEditorScreen({ novelId, chapterId, ctx, onBack }) {
   const [isPremium, setIsPremium] = useState(false);
   const [coinPrice, setCoinPrice] = useState(15);
   const [blueprint, setBlueprint] = useState("kosong");
+  const [status, setStatus] = useState("published");
   const [existing, setExisting] = useState(null);
   const [showGlossary, setShowGlossary] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -2266,6 +2697,7 @@ function ChapterEditorScreen({ novelId, chapterId, ctx, onBack }) {
           setIsPremium(c.isPremium);
           setCoinPrice(c.coinPrice || 15);
           setBlueprint(c.blueprintType || "kosong");
+          setStatus(c.status === "draft" ? "draft" : "published");
         }
       }
     })();
@@ -2281,16 +2713,16 @@ function ChapterEditorScreen({ novelId, chapterId, ctx, onBack }) {
 
   const wordCount = content.trim() ? content.trim().split(/\s+/).length : 0;
 
-  async function handlePublish() {
+  async function handlePublish(saveStatus) {
     if (!title.trim() || !content.trim()) return;
     setSaving(true);
     if (existing) {
-      await updateChapter({ ...existing, title, content, isPremium, coinPrice: isPremium ? coinPrice : 0, blueprintType: blueprint });
+      await updateChapter({ ...existing, title, content, isPremium, coinPrice: isPremium ? coinPrice : 0, blueprintType: blueprint, status: saveStatus });
     } else {
-      await addChapter(novelId, { title, content, isPremium, coinPrice, blueprintType: blueprint });
+      await addChapter(novelId, { title, content, isPremium, coinPrice, blueprintType: blueprint, status: saveStatus });
     }
     setSaving(false);
-    showToast("Bab tersimpan & terbit!");
+    showToast(saveStatus === "draft" ? "Bab tersimpan sebagai draft." : "Bab tersimpan & terbit!");
     onBack();
   }
 
@@ -2367,9 +2799,22 @@ function ChapterEditorScreen({ novelId, chapterId, ctx, onBack }) {
           Kamu menerima <b style={{ color: C.gold }}>70%</b> dari setiap Batu Spiritual pembuka bab premium ini.
         </div>
 
-        <button onClick={handlePublish} disabled={saving || !title.trim() || !content.trim()} style={{ width: "100%", padding: "13px 0", borderRadius: 10, border: "none", background: C.jade, color: "#08170f", fontWeight: 800, fontSize: 14, cursor: "pointer", opacity: title.trim() && content.trim() ? 1 : 0.6 }}>
-          {existing ? "Simpan & Terbitkan" : "Terbitkan Bab"}
-        </button>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button
+            onClick={() => handlePublish("draft")}
+            disabled={saving || !title.trim() || !content.trim()}
+            style={{ flex: 1, padding: "13px 0", borderRadius: 10, border: `1.5px solid ${C.gold}`, background: "transparent", color: C.gold, fontWeight: 700, fontSize: 13, cursor: "pointer", opacity: title.trim() && content.trim() ? 1 : 0.6 }}
+          >
+            Simpan Draft
+          </button>
+          <button
+            onClick={() => handlePublish("published")}
+            disabled={saving || !title.trim() || !content.trim()}
+            style={{ flex: 1, padding: "13px 0", borderRadius: 10, border: "none", background: C.jade, color: "#08170f", fontWeight: 800, fontSize: 13, cursor: "pointer", opacity: title.trim() && content.trim() ? 1 : 0.6 }}
+          >
+            {existing && status === "published" ? "Simpan & Terbitkan" : "Terbitkan Bab"}
+          </button>
+        </div>
       </div>
     </div>
   );
