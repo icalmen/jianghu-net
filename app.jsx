@@ -336,8 +336,11 @@ function App() {
   function push(screen, params = {}) {
     setStack((s) => [...s, { screen, params }]);
   }
-  function pop() {
+    function pop() {
     setStack((s) => s.slice(0, -1));
+  }
+  function replace(screen, params = {}) {
+    setStack((s) => (s.length ? [...s.slice(0, -1), { screen, params }] : [{ screen, params }]));
   }
   const current = stack[stack.length - 1] || null;
 
