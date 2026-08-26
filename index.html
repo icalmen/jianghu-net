@@ -19,13 +19,17 @@
   * { box-sizing: border-box; }
 </style>
 
-<!-- React + ReactDOM (production builds) -->
+<!-- React + ReactDOM (production builds, version-pinned for stability) -->
 <script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js" crossorigin></script>
+<!-- Babel standalone: lets the browser transform JSX at runtime, no build step needed.
+     Pinned to 7.24.7 — the unversioned "latest" build broke JSX/script-tag transforms
+     with a "Cannot use import statement outside a module" error during testing. -->
 <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
-  
+
 <!-- Firebase compat SDK: simple <script>-tag usage, no bundler required -->
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 </head>
 <body>
@@ -46,9 +50,10 @@
   };
   firebase.initializeApp(firebaseConfig);
   window.__jianghuDb = firebase.firestore();
+  window.__jianghuAuth = firebase.auth();
 </script>
 
-<script type="text/babel" data-presets="react" src="app.jsx?v=2"></script>
+<script type="text/babel" data-presets="react" src="app.jsx"></script>
 
 <script>
   if ('serviceWorker' in navigator) {
