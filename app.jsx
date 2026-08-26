@@ -517,6 +517,7 @@ function App() {
     loadingCatalog,
     push,
     pop,
+    replace,
     requireLogin,
     createNovel,
     saveNovel,
@@ -1239,7 +1240,7 @@ function renderWithGlossary(text, characters, onPick) {
 }
 
 function ReaderScreen({ novelId, chapterId, ctx, onBack }) {
-  const { unlockChapter, isUnlocked, username, user, push, markProgress, showToast } = ctx;
+  const { unlockChapter, isUnlocked, username, user, push, replace, markProgress, showToast } = ctx;
   const [novel, setNovel] = useState(null);
   const [chapters, setChapters] = useState([]);
   const [chapter, setChapter] = useState(null);
@@ -1329,7 +1330,7 @@ function ReaderScreen({ novelId, chapterId, ctx, onBack }) {
   }
 
   function goTo(id) {
-    push("reader", { novelId, chapterId: id });
+    replace("reader", { novelId, chapterId: id });
   }
 
   if (loading || !chapter) return <TopBar title="Membuka bab…" onBack={onBack} />;
