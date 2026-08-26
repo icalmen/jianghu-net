@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<title>Test 2 - Pinned Versions</title>
+<script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+</head>
+<body style="background:#121212;color:#fff;font-family:sans-serif;">
+<div id="root">Kalau tulisan ini masih ada, berarti React belum jalan.</div>
+
+<script type="text/babel" data-presets="react">
+const { useState } = React;
+
+function TestApp() {
+  const [count, setCount] = useState(0);
+  return (
+    <div style={{ padding: 30 }}>
+      <h1>Tes 2 berhasil! ✅</h1>
+      <p>Versi Babel yang dikunci (7.24.7) jalan normal.</p>
+      <button onClick={() => setCount(count + 1)}>
+        Klik saya: {count}
+      </button>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<TestApp />);
+</script>
+</body>
+</html>
