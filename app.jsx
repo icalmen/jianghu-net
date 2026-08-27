@@ -383,11 +383,12 @@ function App() {
   async function loadUser(uid, fbUser) {
     let u = await gJSON(`user:${uid}`, true, null);
     if (!u) {
-      const fallbackName = (fbUser && fbUser.email ? fbUser.email.split("@")[0] : "Pendekar");
+      const fallbackName = (fbUser && fbUser.displayName) || (fbUser && fbUser.email ? fbUser.email.split("@")[0] : "Pendekar");
       u = {
         uid,
         email: fbUser ? fbUser.email : null,
         displayName: fallbackName,
+        photoURL: (fbUser && fbUser.photoURL) || null,
         stones: 200,
         tier: "luar",
         tierUntil: 0,
@@ -403,6 +404,19 @@ function App() {
   async function saveUser(next) {
     setUser(next);
     await sJSON(`user:${next.uid}`, next, true);
+  }
+
+  async function doGoogleSignIn() {
+    try {
+      const provider = new firebase.auth.GoogleAuthProvider();
+      await window.__jianghuAuth.signInWithPopup(provider);
+      // onAuthStateChanged (below) picks up the new session automatically
+      // and creates/loads the Firestore profile — nothing else to do here.
+      return { ok: true };
+    } catch (e) {
+      if (e && e.code === "auth/popup-closed-by-user") return { ok: false, error: "" };
+      return { ok: false, error: authErrorMessage(e) };
+    }
   }
 
   async function loadCatalog() {
@@ -469,6 +483,37 @@ function App() {
     window.__jianghuAuth.signOut();
     setTab("home");
     setStack([]);
+  }
+
+  async function updateDisplayName(newName) {
+    if (!user || !newName.trim()) return false;
+    const next = { ...user, displayName: newName.trim() };
+    await saveUser(next);
+    return true;
+  }
+
+  async function sendPasswordReset() {
+    if (!user || !user.email) return { ok: false, error: "Akun ini tidak memakai email/password (mungkin login via Google)." };
+    try {
+      await window.__jianghuAuth.sendPasswordResetEmail(user.email);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: authErrorMessage(e) };
+    }
+  }
+
+  async function deleteAccount() {
+    try {
+      const current = window.__jianghuAuth.currentUser;
+      if (!current) return { ok: false, error: "Sesi login tidak ditemukan." };
+      await current.delete();
+      return { ok: true };
+    } catch (e) {
+      if (e && e.code === "auth/requires-recent-login") {
+        return { ok: false, error: "Demi keamanan, keluar dan masuk lagi sebelum menghapus akun." };
+      }
+      return { ok: false, error: authErrorMessage(e) };
+    }
   }
 
   function push(screen, params = {}) {
@@ -715,7 +760,8 @@ function App() {
         <GlobalStyle />
         <div style={{ textAlign: "center" }}>
           <div style={{ fontFamily: "'Ma Shan Zheng', serif", fontSize: 44, color: C.jade }}>江湖</div>
-          <div style={{ color: C.textFaint, fontSize: 11, letterSpacing: 3, marginTop: 8 }}>MEMASUKI JIANGHU…</div>
+          <div style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 20, color: C.text, marginTop: 6 }}>Jianghu-Net</div>
+          <div style={{ color: C.textFaint, fontSize: 11, letterSpacing: 3, marginTop: 10 }}>MEMASUKI JIANGHU…</div>
         </div>
       </div>
     );
@@ -733,6 +779,11 @@ function App() {
     requireLogin,
     doSignup,
     doLoginEmail,
+    doGoogleSignIn,
+    updateDisplayName,
+    sendPasswordReset,
+    deleteAccount,
+    doLogout,
     createNovel,
     saveNovel,
     addChapter,
@@ -881,6 +932,7 @@ function ScreenRouter({ entry, ctx, onBack }) {
       {screen === "powerSystem" && <PowerSystemScreen novelId={params.novelId} ctx={ctx} onBack={onBack} />}
       {screen === "distribution" && <DistributionScreen novelId={params.novelId} ctx={ctx} onBack={onBack} />}
       {screen === "legal" && <LegalScreen onBack={onBack} />}
+      {screen === "settings" && <SettingsScreen ctx={ctx} onBack={onBack} />}
     </div>
   );
 }
@@ -1351,6 +1403,7 @@ function ProfileScreen({ ctx, username, doLogout }) {
 
       <MenuRow label="Dompet & Langganan Tier" onClick={() => push("wallet", {})} />
       <MenuRow label="Ruang Meditasi (Studio Penulis)" onClick={() => push("studio", {})} />
+      <MenuRow label="Pengaturan Aplikasi & Akun" onClick={() => push("settings", {})} />
       <MenuRow label="Kebijakan Privasi & Ketentuan" onClick={() => push("legal", {})} />
 
       <button onClick={doLogout} style={{ width: "100%", marginTop: 22, padding: "12px 0", borderRadius: 10, border: `1.5px solid ${C.danger}`, background: "transparent", color: C.danger, fontWeight: 700, fontSize: 13.5, cursor: "pointer" }}>
@@ -1948,6 +2001,94 @@ function EmptyState({ ctx, title, body, cta, onCta }) {
 }
 
 /* ================================================================
+   SETTINGS — Account & App
+================================================================ */
+function SettingsScreen({ ctx, onBack }) {
+  const { user, updateDisplayName, sendPasswordReset, deleteAccount, doLogout, showToast, push } = ctx;
+  const [nameDraft, setNameDraft] = useState(user ? user.displayName : "");
+  const [savingName, setSavingName] = useState(false);
+  const [resetBusy, setResetBusy] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+
+  async function handleSaveName() {
+    if (!nameDraft.trim()) return;
+    setSavingName(true);
+    await updateDisplayName(nameDraft);
+    setSavingName(false);
+    showToast("Nama pena tersimpan.");
+  }
+
+  async function handleResetPassword() {
+    setResetBusy(true);
+    const r = await sendPasswordReset();
+    setResetBusy(false);
+    showToast(r.ok ? "Tautan reset password terkirim ke email kamu." : r.error);
+  }
+
+  async function handleDeleteAccount() {
+    if (!window.confirm("Hapus akun ini secara permanen? Cerita dan bab yang sudah kamu terbitkan TIDAK ikut terhapus, tapi kamu tidak akan bisa masuk lagi dengan akun ini.")) return;
+    setDeleteBusy(true);
+    const r = await deleteAccount();
+    setDeleteBusy(false);
+    if (r.ok) {
+      showToast("Akun telah dihapus.");
+    } else {
+      showToast(r.error);
+    }
+  }
+
+  if (!user) return <TopBar title="Pengaturan" onBack={onBack} />;
+
+  return (
+    <div>
+      <TopBar title="Pengaturan Aplikasi & Akun" onBack={onBack} />
+      <div style={{ padding: 18 }}>
+        <div style={{ fontWeight: 700, fontSize: 13.5, marginBottom: 10 }}>Akun</div>
+
+        <Field label="Nama Pena">
+          <div style={{ display: "flex", gap: 8 }}>
+            <input value={nameDraft} onChange={(e) => setNameDraft(e.target.value)} style={{ ...inputStyle(), flex: 1 }} />
+            <button onClick={handleSaveName} disabled={savingName} style={{ padding: "0 16px", borderRadius: 10, border: "none", background: C.jade, color: "#08170f", fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}>
+              Simpan
+            </button>
+          </div>
+        </Field>
+
+        <Field label="Email">
+          <div style={{ ...inputStyle(), color: C.textFaint, cursor: "default" }}>{user.email || "Login via Google"}</div>
+        </Field>
+
+        {user.email && (
+          <button
+            onClick={handleResetPassword}
+            disabled={resetBusy}
+            style={{ width: "100%", padding: "11px 0", borderRadius: 10, border: `1.5px solid ${C.border}`, background: "transparent", color: C.text, fontWeight: 700, fontSize: 12.5, cursor: "pointer", marginBottom: 20 }}
+          >
+            {resetBusy ? "Mengirim…" : "Kirim Tautan Reset Password"}
+          </button>
+        )}
+
+        <BambooDivider />
+
+        <div style={{ fontWeight: 700, fontSize: 13.5, margin: "18px 0 10px" }}>Tentang Aplikasi</div>
+        <MenuRow label="Kebijakan Privasi & Ketentuan" onClick={() => push("legal", {})} />
+        <MenuRow label="Versi Aplikasi" value="1.0.0" />
+
+        <div style={{ marginTop: 28, border: `1.5px solid ${C.danger}`, borderRadius: 12, padding: 16 }}>
+          <div style={{ fontWeight: 700, fontSize: 13, color: C.danger, marginBottom: 6 }}>Zona Berbahaya</div>
+          <div style={{ fontSize: 11.5, color: C.textSoft, marginBottom: 12, lineHeight: 1.5 }}>
+            Menghapus akun bersifat permanen. Saldo Batu Spiritual dan riwayat transaksi akan hilang. Cerita yang sudah kamu terbitkan tetap ada di katalog tapi tidak bisa lagi kamu kelola.
+          </div>
+          <button onClick={handleDeleteAccount} disabled={deleteBusy} style={{ width: "100%", padding: "10px 0", borderRadius: 10, border: "none", background: C.danger, color: "#fff", fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}>
+            {deleteBusy ? "Menghapus…" : "Hapus Akun Ini"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ================================================================
    LEGAL — Privacy Policy & Terms
 ================================================================ */
 function LegalScreen({ onBack }) {
@@ -1994,6 +2135,7 @@ function LoginScreen({ ctx, onBack, params }) {
   const [displayName, setDisplayName] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [googleBusy, setGoogleBusy] = useState(false);
 
   async function submit() {
     setError("");
@@ -2017,6 +2159,19 @@ function LoginScreen({ ctx, onBack, params }) {
     if (params && params.after) ctx.push(params.after.screen, params.after.params);
   }
 
+  async function submitGoogle() {
+    setError("");
+    setGoogleBusy(true);
+    const r = await ctx.doGoogleSignIn();
+    setGoogleBusy(false);
+    if (!r.ok) {
+      if (r.error) setError(r.error);
+      return;
+    }
+    onBack();
+    if (params && params.after) ctx.push(params.after.screen, params.after.params);
+  }
+
   return (
     <div>
       <TopBar title={mode === "signup" ? "Daftar Akun" : "Masuk"} onBack={onBack} />
@@ -2029,6 +2184,37 @@ function LoginScreen({ ctx, onBack, params }) {
           <div style={{ fontSize: 12, color: C.textSoft, marginTop: 6, lineHeight: 1.6 }}>
             {mode === "signup" ? "Nama pena akan tampil ke pembaca lain. Email & password dipakai untuk masuk kembali." : "Masuk dengan email dan password yang sudah kamu daftarkan."}
           </div>
+        </div>
+
+        <button
+          onClick={submitGoogle}
+          disabled={googleBusy}
+          style={{
+            width: "100%",
+            padding: "12px 0",
+            borderRadius: 10,
+            border: `1.5px solid ${C.border}`,
+            background: "#fff",
+            color: "#1f1f1f",
+            fontWeight: 700,
+            fontSize: 13.5,
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 10,
+            marginBottom: 18,
+            opacity: googleBusy ? 0.7 : 1,
+          }}
+        >
+          <span style={{ width: 18, height: 18, borderRadius: "50%", background: "conic-gradient(#4285F4 0deg 90deg, #34A853 90deg 180deg, #FBBC05 180deg 270deg, #EA4335 270deg 360deg)", display: "inline-block" }} />
+          {googleBusy ? "Menghubungkan…" : "Lanjutkan dengan Google"}
+        </button>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18 }}>
+          <div style={{ flex: 1, height: 1, background: C.border }} />
+          <span style={{ fontSize: 11, color: C.textFaint }}>atau pakai email</span>
+          <div style={{ flex: 1, height: 1, background: C.border }} />
         </div>
 
         {mode === "signup" && (
