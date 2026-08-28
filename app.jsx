@@ -53,6 +53,8 @@ const GENRES = [
   { id: "xuanhuan", label: "Xuanhuan", glyph: "玄" },
   { id: "cosmic", label: "Sci-Fi Kultivasi Kosmik", glyph: "星" },
   { id: "nusantara", label: "Silat Nusantara", glyph: "keris" },
+  { id: "urban", label: "Urban Cultivation (都市修真)", glyph: "都" },
+  { id: "system", label: "RPG / System (Sistem Antarmuka)", glyph: "統" },
 ];
 
 const GLYPHS = ["劍", "俠", "刀", "拳", "龍", "武", "門", "影", "仙", "星"];
@@ -442,6 +444,10 @@ function App() {
       "auth/invalid-credential": "Email atau password salah.",
       "auth/too-many-requests": "Terlalu banyak percobaan. Coba lagi beberapa saat lagi.",
       "auth/network-request-failed": "Koneksi bermasalah. Cek internet kamu.",
+      "auth/unauthorized-domain": "Domain ini belum diizinkan di Firebase Console (Authentication → Settings → Authorized domains). Tambahkan domain situs ini lalu coba lagi.",
+      "auth/popup-blocked": "Pop-up diblokir browser. Izinkan pop-up untuk situs ini lalu coba lagi.",
+      "auth/cancelled-popup-request": "",
+      "auth/operation-not-allowed": "Login Google belum diaktifkan di Firebase Console (Authentication → Sign-in method → Google).",
     };
     return (e && map[e.code]) || "Terjadi kesalahan. Coba lagi.";
   }
