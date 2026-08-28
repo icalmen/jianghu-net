@@ -55,6 +55,8 @@ const GENRES = [
   { id: "nusantara", label: "Silat Nusantara", glyph: "keris" },
   { id: "urban", label: "Urban Cultivation (都市修真)", glyph: "都" },
   { id: "system", label: "RPG / System (Sistem Antarmuka)", glyph: "統" },
+  { id: "darkurban", label: "Dark Urban Fantasy", glyph: "暗" },
+  { id: "misc", label: "Lain-lain", glyph: "雜" },
 ];
 
 const GLYPHS = ["劍", "俠", "刀", "拳", "龍", "武", "門", "影", "仙", "星"];
