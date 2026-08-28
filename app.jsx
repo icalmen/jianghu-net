@@ -561,6 +561,7 @@ function App() {
       chapterIds: [],
       frameworks: [],
       characters: [],
+      worldEntries: [],
       reads: 0,
       tips: 0,
       ratingSum: 0,
@@ -937,6 +938,7 @@ function ScreenRouter({ entry, ctx, onBack }) {
       {screen === "studioNovel" && <StudioNovelScreen novelId={params.novelId} ctx={ctx} onBack={onBack} />}
       {screen === "chapterEditor" && <ChapterEditorScreen novelId={params.novelId} chapterId={params.chapterId} ctx={ctx} onBack={onBack} />}
       {screen === "characterEditor" && <CharacterEditorScreen novelId={params.novelId} characterId={params.characterId} ctx={ctx} onBack={onBack} />}
+      {screen === "worldEntryEditor" && <WorldEntryEditorScreen novelId={params.novelId} entryId={params.entryId} ctx={ctx} onBack={onBack} />}
       {screen === "powerSystem" && <PowerSystemScreen novelId={params.novelId} ctx={ctx} onBack={onBack} />}
       {screen === "distribution" && <DistributionScreen novelId={params.novelId} ctx={ctx} onBack={onBack} />}
       {screen === "legal" && <LegalScreen onBack={onBack} />}
@@ -1152,11 +1154,32 @@ function NovelRow({ title, subtitle, novels, ctx }) {
       <div style={{ display: "flex", gap: 12, overflowX: "auto", padding: "0 18px 4px", scrollbarWidth: "none" }}>
         {novels.map((n) => (
           <div key={n.id} onClick={() => push("story", { novelId: n.id })} style={{ width: 110, flexShrink: 0, cursor: "pointer" }}>
-            <div style={{ marginBottom: 6 }}>
+            <div style={{ marginBottom: 6, position: "relative" }}>
               <CoverThumb novel={n} size="md" />
+              {n.genre && (
+                <span
+                  style={{
+                    position: "absolute",
+                    top: 6,
+                    left: 6,
+                    fontSize: 8.5,
+                    fontWeight: 700,
+                    color: "#08170f",
+                    background: C.gold,
+                    padding: "2px 6px",
+                    borderRadius: 999,
+                    maxWidth: 96,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {n.genre}
+                </span>
+              )}
             </div>
             <div style={{ fontSize: 12, fontWeight: 700, lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{n.title}</div>
-            <div style={{ fontSize: 10, color: C.textFaint, marginTop: 2 }}>{n.author}</div>
+            <div style={{ fontSize: 10, color: C.textFaint, marginTop: 2 }}>{n.authorName}</div>
           </div>
         ))}
       </div>
@@ -1216,7 +1239,12 @@ function NovelListCard({ novel, onOpen }) {
       <CoverThumb novel={novel} size="sm" radius={8} />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontWeight: 700, fontSize: 14 }}>{novel.title}</div>
-        <div style={{ fontSize: 11, color: C.textFaint, marginBottom: 4 }}>oleh {novel.authorName}</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 11, color: C.textFaint }}>oleh {novel.authorName}</span>
+          {novel.genre && (
+            <span style={{ fontSize: 9, fontWeight: 700, color: C.jade, background: C.jadeGlow, padding: "1px 7px", borderRadius: 999 }}>{novel.genre}</span>
+          )}
+        </div>
         <div style={{ fontSize: 11.5, color: C.textSoft, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", lineHeight: 1.4 }}>{novel.synopsis}</div>
       </div>
     </div>
@@ -1443,6 +1471,7 @@ function StoryDetailScreen({ novelId, ctx, onBack }) {
   const [comments, setComments] = useState([]);
   const [commentText, setCommentText] = useState("");
   const [postingComment, setPostingComment] = useState(false);
+  const [synopsisExpanded, setSynopsisExpanded] = useState(false);
 
   async function reload() {
     const n = await gJSON(`novel:${novelId}`, true, null);
@@ -1550,7 +1579,26 @@ function StoryDetailScreen({ novelId, ctx, onBack }) {
         </div>
 
         <BambooDivider />
-        <div style={{ fontSize: 13.5, lineHeight: 1.7, marginTop: 8 }}>{novel.synopsis}</div>
+        <div
+          style={{
+            fontSize: 13.5,
+            lineHeight: 1.7,
+            marginTop: 8,
+            ...(synopsisExpanded
+              ? {}
+              : { display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }),
+          }}
+        >
+          {novel.synopsis}
+        </div>
+        {novel.synopsis && novel.synopsis.length > 140 && (
+          <button
+            onClick={() => setSynopsisExpanded((v) => !v)}
+            style={{ background: "none", border: "none", color: C.jade, fontSize: 12, fontWeight: 700, cursor: "pointer", padding: "6px 0 0" }}
+          >
+            {synopsisExpanded ? "Tampilkan lebih sedikit" : "Baca selengkapnya"}
+          </button>
+        )}
 
         <div style={{ marginTop: 14 }}>
           <div style={{ fontSize: 11.5, fontWeight: 700, color: C.textSoft, marginBottom: 6 }}>{myRating ? "Penilaianmu" : "Beri Penilaian"}</div>
@@ -1659,14 +1707,17 @@ function StoryDetailScreen({ novelId, ctx, onBack }) {
 /* ================================================================
    READER — with glossary auto-link + paywall flow
 ================================================================ */
-function renderWithGlossary(text, characters, onPick) {
-  if (!characters || characters.length === 0) return text;
-  const names = characters.map((c) => c.name).filter(Boolean).sort((a, b) => b.length - a.length);
-  if (names.length === 0) return text;
+function renderWithGlossary(text, characters, worldEntries, onPick) {
+  const items = [
+    ...(characters || []).map((c) => ({ ...c, _kind: "character" })),
+    ...(worldEntries || []).map((e) => ({ ...e, _kind: "world" })),
+  ].filter((x) => x.name);
+  if (items.length === 0) return text;
+  const names = [...new Set(items.map((x) => x.name))].sort((a, b) => b.length - a.length);
   const pattern = new RegExp(`(${names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "g");
   const parts = text.split(pattern);
   return parts.map((part, i) => {
-    const match = characters.find((c) => c.name === part);
+    const match = items.find((x) => x.name === part);
     if (match) {
       return (
         <span key={i} onClick={() => onPick(match)} style={{ color: C.jade, borderBottom: `1px dashed ${C.jade}`, cursor: "pointer", fontWeight: 600 }}>
@@ -1792,7 +1843,7 @@ function ReaderScreen({ novelId, chapterId, ctx, onBack }) {
 
         {unlocked ? (
           <>
-            <div style={{ fontSize, lineHeight: 1.85, whiteSpace: "pre-wrap", fontFamily: "'Noto Serif', serif" }}>{renderWithGlossary(chapter.content, novel.characters, setGlossaryPick)}</div>
+            <div style={{ fontSize, lineHeight: 1.85, whiteSpace: "pre-wrap", fontFamily: "'Noto Serif', serif" }}>{renderWithGlossary(chapter.content, novel.characters, novel.worldEntries, setGlossaryPick)}</div>
             <div style={{ display: "flex", justifyContent: "space-between", marginTop: 30, gap: 10 }}>
               <button disabled={!prev} onClick={() => prev && goTo(prev.id)} style={navBtn(!!prev)}>
                 ← Sebelumnya
@@ -1833,21 +1884,34 @@ function ReaderScreen({ novelId, chapterId, ctx, onBack }) {
       {glossaryPick && (
         <div onClick={() => setGlossaryPick(null)} style={overlayStyle()}>
           <div onClick={(e) => e.stopPropagation()} style={sheetStyle()}>
-            <div style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 17 }}>{glossaryPick.name}</div>
-            {glossaryPick.sect && <div style={{ fontSize: 12, color: C.textSoft, marginTop: 4 }}>Sekte: {glossaryPick.sect}</div>}
-            {glossaryPick.spiritualRoot && <div style={{ fontSize: 12, color: C.textSoft }}>Akar Spiritual: {glossaryPick.spiritualRoot}</div>}
-            {glossaryPick.weapon && <div style={{ fontSize: 12, color: C.textSoft }}>Senjata: {glossaryPick.weapon}</div>}
-            <BambooDivider />
-            {pick ? (
-              <div style={{ fontSize: 13, marginTop: 4 }}>
-                <span style={{ color: C.textFaint }}>Kultivasi: </span>
-                <span style={{ color: C.jade, fontWeight: 700 }}>
-                  {pick.realm.realmName}
-                  {pick.stage ? ` - ${pick.stage.stageName}` : ""}
+            {glossaryPick._kind === "world" ? (
+              <>
+                <span style={{ fontSize: 9.5, fontWeight: 700, color: C.gold, background: C.goldGlow, padding: "2px 8px", borderRadius: 999 }}>
+                  {(WORLD_ENTRY_TYPES.find((t) => t.id === glossaryPick.type) || {}).label || "Catatan Dunia"}
                 </span>
-              </div>
+                <div style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 17, marginTop: 8 }}>{glossaryPick.name}</div>
+                <BambooDivider />
+                <div style={{ fontSize: 13, lineHeight: 1.7, marginTop: 4, color: C.textSoft }}>{glossaryPick.description || "Belum ada deskripsi."}</div>
+              </>
             ) : (
-              <div style={{ fontSize: 12.5, color: C.textFaint, marginTop: 4 }}>Tingkat kultivasi belum ditetapkan penulis.</div>
+              <>
+                <div style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 17 }}>{glossaryPick.name}</div>
+                {glossaryPick.sect && <div style={{ fontSize: 12, color: C.textSoft, marginTop: 4 }}>Sekte: {glossaryPick.sect}</div>}
+                {glossaryPick.spiritualRoot && <div style={{ fontSize: 12, color: C.textSoft }}>Akar Spiritual: {glossaryPick.spiritualRoot}</div>}
+                {glossaryPick.weapon && <div style={{ fontSize: 12, color: C.textSoft }}>Senjata: {glossaryPick.weapon}</div>}
+                <BambooDivider />
+                {pick ? (
+                  <div style={{ fontSize: 13, marginTop: 4 }}>
+                    <span style={{ color: C.textFaint }}>Kultivasi: </span>
+                    <span style={{ color: C.jade, fontWeight: 700 }}>
+                      {pick.realm.realmName}
+                      {pick.stage ? ` - ${pick.stage.stageName}` : ""}
+                    </span>
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 12.5, color: C.textFaint, marginTop: 4 }}>Tingkat kultivasi belum ditetapkan penulis.</div>
+                )}
+              </>
             )}
             <button onClick={() => setGlossaryPick(null)} style={{ marginTop: 16, width: "100%", padding: "11px 0", borderRadius: 10, border: `1px solid ${C.border}`, background: "transparent", color: C.text, fontWeight: 700, cursor: "pointer" }}>
               Tutup
@@ -2539,26 +2603,151 @@ function StudioNovelScreen({ novelId, ctx, onBack }) {
   );
 }
 
+const WORLD_ENTRY_TYPES = [
+  { id: "sekte", label: "Sekte / Faksi", glyph: "宗" },
+  { id: "lokasi", label: "Lokasi", glyph: "地" },
+  { id: "pusaka", label: "Pusaka / Item", glyph: "劍" },
+  { id: "sejarah", label: "Sejarah / Lore", glyph: "史" },
+  { id: "istilah", label: "Istilah", glyph: "詞" },
+];
+
 function WorldBuildingPanel({ novel, ctx }) {
   const { push } = ctx;
+  const [subtab, setSubtab] = useState("karakter");
+
   return (
     <div style={{ padding: 18 }}>
-      <div style={{ fontSize: 12, color: C.textSoft, marginBottom: 16, lineHeight: 1.6 }}>
-        Lacak afiliasi sekte, akar spiritual, dan senjata setiap karakter agar konsisten di seluruh bab. Pembaca bisa mengetuk nama karakter di teks untuk melihat status kultivasinya.
+      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+        <SubTabBtn label="Karakter" active={subtab === "karakter"} onClick={() => setSubtab("karakter")} />
+        <SubTabBtn label="Catatan Dunia" active={subtab === "dunia"} onClick={() => setSubtab("dunia")} />
       </div>
-      <button onClick={() => push("characterEditor", { novelId: novel.id, characterId: null })} style={{ width: "100%", padding: "12px 0", borderRadius: 10, border: "none", background: C.jade, color: "#08170f", fontWeight: 800, fontSize: 13.5, cursor: "pointer", marginBottom: 18 }}>
-        + Tambah Karakter
-      </button>
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {(novel.characters || []).map((c) => (
-          <div key={c.id} onClick={() => push("characterEditor", { novelId: novel.id, characterId: c.id })} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 13, cursor: "pointer" }}>
-            <div style={{ fontWeight: 700, fontSize: 14 }}>{c.name}</div>
-            <div style={{ fontSize: 11.5, color: C.textFaint, marginTop: 4 }}>
-              {c.sect ? `Sekte: ${c.sect}` : "Sekte belum diisi"} {c.weapon ? `· Senjata: ${c.weapon}` : ""}
-            </div>
+
+      {subtab === "karakter" && (
+        <div>
+          <div style={{ fontSize: 12, color: C.textSoft, marginBottom: 16, lineHeight: 1.6 }}>
+            Lacak afiliasi sekte, akar spiritual, dan senjata setiap karakter agar konsisten di seluruh bab. Pembaca bisa mengetuk nama karakter di teks untuk melihat status kultivasinya.
           </div>
-        ))}
-        {(novel.characters || []).length === 0 && <div style={{ fontSize: 12.5, color: C.textFaint, textAlign: "center", padding: "16px 0" }}>Belum ada karakter tercatat.</div>}
+          <button onClick={() => push("characterEditor", { novelId: novel.id, characterId: null })} style={{ width: "100%", padding: "12px 0", borderRadius: 10, border: "none", background: C.jade, color: "#08170f", fontWeight: 800, fontSize: 13.5, cursor: "pointer", marginBottom: 18 }}>
+            + Tambah Karakter
+          </button>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {(novel.characters || []).map((c) => (
+              <div key={c.id} onClick={() => push("characterEditor", { novelId: novel.id, characterId: c.id })} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 13, cursor: "pointer" }}>
+                <div style={{ fontWeight: 700, fontSize: 14 }}>{c.name}</div>
+                <div style={{ fontSize: 11.5, color: C.textFaint, marginTop: 4 }}>
+                  {c.sect ? `Sekte: ${c.sect}` : "Sekte belum diisi"} {c.weapon ? `· Senjata: ${c.weapon}` : ""}
+                </div>
+              </div>
+            ))}
+            {(novel.characters || []).length === 0 && <div style={{ fontSize: 12.5, color: C.textFaint, textAlign: "center", padding: "16px 0" }}>Belum ada karakter tercatat.</div>}
+          </div>
+        </div>
+      )}
+
+      {subtab === "dunia" && (
+        <div>
+          <div style={{ fontSize: 12, color: C.textSoft, marginBottom: 16, lineHeight: 1.6 }}>
+            Catat lokasi, sekte/faksi, pusaka, sejarah, dan istilah dunia ceritamu agar konsisten. Nama entri ini juga bisa diketuk pembaca di dalam teks bab, sama seperti nama karakter.
+          </div>
+          <button onClick={() => push("worldEntryEditor", { novelId: novel.id, entryId: null })} style={{ width: "100%", padding: "12px 0", borderRadius: 10, border: "none", background: C.jade, color: "#08170f", fontWeight: 800, fontSize: 13.5, cursor: "pointer", marginBottom: 18 }}>
+            + Tambah Catatan Dunia
+          </button>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {(novel.worldEntries || []).map((e) => {
+              const typeInfo = WORLD_ENTRY_TYPES.find((t) => t.id === e.type) || WORLD_ENTRY_TYPES[0];
+              return (
+                <div key={e.id} onClick={() => push("worldEntryEditor", { novelId: novel.id, entryId: e.id })} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 13, cursor: "pointer" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 9.5, fontWeight: 700, color: C.gold, background: C.goldGlow, padding: "2px 8px", borderRadius: 999 }}>{typeInfo.label}</span>
+                    <span style={{ fontWeight: 700, fontSize: 14 }}>{e.name}</span>
+                  </div>
+                  {e.description && (
+                    <div style={{ fontSize: 11.5, color: C.textFaint, marginTop: 6, lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{e.description}</div>
+                  )}
+                </div>
+              );
+            })}
+            {(novel.worldEntries || []).length === 0 && <div style={{ fontSize: 12.5, color: C.textFaint, textAlign: "center", padding: "16px 0" }}>Belum ada catatan dunia.</div>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WorldEntryEditorScreen({ novelId, entryId, ctx, onBack }) {
+  const { showToast } = ctx;
+  const [novel, setNovel] = useState(null);
+  const [type, setType] = useState(WORLD_ENTRY_TYPES[0].id);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      const n = await gJSON(`novel:${novelId}`, true, null);
+      setNovel(n);
+      if (entryId && n) {
+        const e = (n.worldEntries || []).find((x) => x.id === entryId);
+        if (e) {
+          setType(e.type);
+          setName(e.name);
+          setDescription(e.description || "");
+        }
+      }
+    })();
+  }, [novelId, entryId]);
+
+  if (!novel) return <TopBar title="Memuat…" onBack={onBack} />;
+
+  async function handleSave() {
+    if (!name.trim()) return;
+    const entries = [...(novel.worldEntries || [])];
+    if (entryId) {
+      const i = entries.findIndex((e) => e.id === entryId);
+      entries[i] = { ...entries[i], type, name, description };
+    } else {
+      entries.push({ id: uid("world"), type, name, description });
+    }
+    await ctx.saveNovel({ ...novel, worldEntries: entries });
+    showToast("Catatan dunia tersimpan.");
+    onBack();
+  }
+
+  async function handleDelete() {
+    if (!window.confirm(`Hapus catatan "${name}"?`)) return;
+    const entries = (novel.worldEntries || []).filter((e) => e.id !== entryId);
+    await ctx.saveNovel({ ...novel, worldEntries: entries });
+    showToast("Catatan dihapus.");
+    onBack();
+  }
+
+  return (
+    <div>
+      <TopBar title={entryId ? "Sunting Catatan Dunia" : "Catatan Dunia Baru"} onBack={onBack} />
+      <div style={{ padding: 18 }}>
+        <Field label="Tipe">
+          <select value={type} onChange={(e) => setType(e.target.value)} style={inputStyle()}>
+            {WORLD_ENTRY_TYPES.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.label}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Nama">
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Contoh: Sekte Awan Ungu / Lembah Sunyi / Pedang Naga Merah" style={inputStyle()} />
+        </Field>
+        <Field label="Deskripsi">
+          <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={6} placeholder="Jelaskan detail, sejarah, atau aturan terkait entri ini…" style={{ ...inputStyle(), resize: "vertical" }} />
+        </Field>
+        <button onClick={handleSave} disabled={!name.trim()} style={{ width: "100%", padding: "13px 0", borderRadius: 10, border: "none", background: C.jade, color: "#08170f", fontWeight: 800, fontSize: 14, cursor: "pointer", opacity: name.trim() ? 1 : 0.6, marginBottom: 10 }}>
+          Simpan Catatan
+        </button>
+        {entryId && (
+          <button onClick={handleDelete} style={{ width: "100%", padding: "11px 0", borderRadius: 10, border: `1.5px solid ${C.danger}`, background: "transparent", color: C.danger, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+            Hapus Catatan Ini
+          </button>
+        )}
       </div>
     </div>
   );
