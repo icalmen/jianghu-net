@@ -101,6 +101,22 @@ const BLUEPRINTS = [
   },
 ];
 
+const LANGUAGES = [
+  { code: "id", label: "Bahasa Indonesia (Asli)" },
+  { code: "en", label: "English" },
+  { code: "zh-CN", label: "中文 (简体)" },
+  { code: "ja", label: "日本語" },
+  { code: "ko", label: "한국어" },
+  { code: "es", label: "Español" },
+  { code: "fr", label: "Français" },
+  { code: "pt", label: "Português" },
+  { code: "vi", label: "Tiếng Việt" },
+  { code: "th", label: "ภาษาไทย" },
+  { code: "de", label: "Deutsch" },
+  { code: "ar", label: "العربية" },
+  { code: "hi", label: "हिन्दी" },
+];
+
 function uid(p) {
   return `${p}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 }
@@ -143,6 +159,54 @@ function fileToResizedDataURL(file, maxW = 300, maxH = 420, quality = 0.72) {
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
+}
+
+/* ---------------- translation ----------------
+   Uses Google Translate's public web endpoint (the same one translate.google.com
+   itself calls) since it needs no API key or billing account — good enough for
+   a hobby-scale reading app. It is NOT an officially documented/supported API,
+   so it can change or rate-limit without notice; a production app that needs
+   guaranteed uptime should swap this for the paid Cloud Translation or DeepL
+   API instead. Results are cached in Firestore per chapter+language so we only
+   ever call it once per unique (chapter, language) pair.
+================================================================== */
+function splitIntoChunks(text, maxLen = 1800) {
+  const paragraphs = text.split("\n");
+  const chunks = [];
+  let current = "";
+  for (const p of paragraphs) {
+    if ((current + "\n" + p).length > maxLen && current) {
+      chunks.push(current);
+      current = p;
+    } else {
+      current = current ? current + "\n" + p : p;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+async function translateText(text, targetLang) {
+  const chunks = splitIntoChunks(text);
+  const results = [];
+  for (const chunk of chunks) {
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetLang}&dt=t&q=${encodeURIComponent(chunk)}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("Layanan terjemahan sedang tidak tersedia.");
+    const data = await res.json();
+    results.push((data[0] || []).map((seg) => seg[0]).join(""));
+  }
+  return results.join("\n");
+}
+
+async function getTranslatedChapter(novelId, chapterId, lang, originalText) {
+  if (lang === "id") return originalText;
+  const cacheKey = `translation:${novelId}:${chapterId}:${lang}`;
+  const cached = await sGet(cacheKey, true);
+  if (cached) return cached;
+  const translated = await translateText(originalText, lang);
+  await sSet(cacheKey, translated, true);
+  return translated;
 }
 
 /* ---------------- storage helpers ----------------
@@ -500,6 +564,12 @@ function App() {
     return true;
   }
 
+  async function updateReadingLang(lang) {
+    if (!user) return;
+    const next = { ...user, readingLang: lang };
+    await saveUser(next);
+  }
+
   async function sendPasswordReset() {
     if (!user || !user.email) return { ok: false, error: "Akun ini tidak memakai email/password (mungkin login via Google)." };
     try {
@@ -790,6 +860,7 @@ function App() {
     doLoginEmail,
     doGoogleSignIn,
     updateDisplayName,
+    updateReadingLang,
     sendPasswordReset,
     deleteAccount,
     doLogout,
@@ -931,6 +1002,7 @@ function ScreenRouter({ entry, ctx, onBack }) {
   return (
     <div style={{ minHeight: "100vh" }}>
       {screen === "story" && <StoryDetailScreen novelId={params.novelId} ctx={ctx} onBack={onBack} />}
+      {screen === "genreList" && <GenreListScreen genreId={params.genreId} ctx={ctx} onBack={onBack} />}
       {screen === "reader" && <ReaderScreen novelId={params.novelId} chapterId={params.chapterId} ctx={ctx} onBack={onBack} />}
       {screen === "wallet" && <WalletScreen ctx={ctx} onBack={onBack} />}
       {screen === "login" && <LoginScreen ctx={ctx} onBack={onBack} params={params} />}
@@ -1191,44 +1263,49 @@ function NovelRow({ title, subtitle, novels, ctx }) {
    EXPLORE — Aliran & Sekte
 ================================================================ */
 function ExploreScreen({ ctx }) {
-  const { novels, push } = ctx;
-  const [active, setActive] = useState(null);
-  const list = active ? novels.filter((n) => n.genre === GENRES.find((g) => g.id === active).label) : [];
+  const { push } = ctx;
 
   return (
     <div style={{ padding: 18 }}>
       <div style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 19, marginBottom: 4 }}>Aliran & Sekte</div>
       <div style={{ fontSize: 11.5, color: C.textFaint, marginBottom: 16 }}>Jelajahi jianghu berdasarkan aliran ilmu</div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 22 }}>
-        {GENRES.map((g) => {
-          const isActive = active === g.id;
-          return (
-            <div
-              key={g.id}
-              onClick={() => setActive(isActive ? null : g.id)}
-              style={{ borderRadius: 14, border: `1.5px solid ${isActive ? C.jade : C.border}`, background: isActive ? C.jadeGlow : C.surface, padding: "18px 12px", textAlign: "center", cursor: "pointer" }}
-            >
-              <div style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 26, fontWeight: 800, color: isActive ? C.jade : C.gold }}>{g.glyph === "keris" ? "⚔" : g.glyph}</div>
-              <div style={{ fontSize: 12, fontWeight: 700, marginTop: 8 }}>{g.label}</div>
-            </div>
-          );
-        })}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        {GENRES.map((g) => (
+          <div
+            key={g.id}
+            onClick={() => push("genreList", { genreId: g.id })}
+            style={{ borderRadius: 14, border: `1.5px solid ${C.border}`, background: C.surface, padding: "18px 12px", textAlign: "center", cursor: "pointer" }}
+          >
+            <div style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 26, fontWeight: 800, color: C.gold }}>{g.glyph === "keris" ? "⚔" : g.glyph}</div>
+            <div style={{ fontSize: 12, fontWeight: 700, marginTop: 8 }}>{g.label}</div>
+          </div>
+        ))}
       </div>
+    </div>
+  );
+}
 
-      {active && (
-        <div>
-          <div style={{ fontWeight: 700, fontSize: 13.5, marginBottom: 10 }}>
-            {list.length} cerita di aliran {GENRES.find((g) => g.id === active).label}
-          </div>
-          {list.length === 0 && <div style={{ fontSize: 12.5, color: C.textFaint, padding: "20px 0" }}>Belum ada cerita di aliran ini.</div>}
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {list.map((n) => (
-              <NovelListCard key={n.id} novel={n} onOpen={() => push("story", { novelId: n.id })} />
-            ))}
-          </div>
+function GenreListScreen({ genreId, ctx, onBack }) {
+  const { novels, push } = ctx;
+  const genre = GENRES.find((g) => g.id === genreId) || GENRES[0];
+  const list = novels.filter((n) => n.genre === genre.label);
+
+  return (
+    <div>
+      <TopBar title={genre.label} onBack={onBack} />
+      <div style={{ padding: 18 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18 }}>
+          <span style={{ fontFamily: "'Noto Serif SC', serif", fontSize: 30, fontWeight: 800, color: C.gold }}>{genre.glyph === "keris" ? "⚔" : genre.glyph}</span>
+          <div style={{ fontSize: 12.5, color: C.textFaint }}>{list.length} cerita di aliran ini</div>
         </div>
-      )}
+        {list.length === 0 && <div style={{ fontSize: 12.5, color: C.textFaint, textAlign: "center", padding: "30px 0" }}>Belum ada cerita di aliran ini. Jadilah yang pertama menulisnya.</div>}
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {list.map((n) => (
+            <NovelListCard key={n.id} novel={n} onOpen={() => push("story", { novelId: n.id })} />
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -1730,7 +1807,7 @@ function renderWithGlossary(text, characters, worldEntries, onPick) {
 }
 
 function ReaderScreen({ novelId, chapterId, ctx, onBack }) {
-  const { unlockChapter, isUnlocked, username, user, push, replace, markProgress, showToast } = ctx;
+  const { unlockChapter, isUnlocked, username, user, push, replace, markProgress, showToast, updateReadingLang } = ctx;
   const [novel, setNovel] = useState(null);
   const [chapters, setChapters] = useState([]);
   const [chapter, setChapter] = useState(null);
@@ -1739,6 +1816,11 @@ function ReaderScreen({ novelId, chapterId, ctx, onBack }) {
   const [loading, setLoading] = useState(true);
   const [glossaryPick, setGlossaryPick] = useState(null);
   const [paywallStep, setPaywallStep] = useState("locked");
+  const [lang, setLang] = useState((user && user.readingLang) || "id");
+  const [displayContent, setDisplayContent] = useState("");
+  const [translating, setTranslating] = useState(false);
+  const [translateError, setTranslateError] = useState("");
+  const [showLangSheet, setShowLangSheet] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -1766,6 +1848,42 @@ function ReaderScreen({ novelId, chapterId, ctx, onBack }) {
       setLoading(false);
     })();
   }, [novelId, chapterId, username]);
+
+  // Translate (or pass through) the chapter body whenever the chapter or
+  // chosen reading language changes. Translated text is cached in Firestore
+  // by getTranslatedChapter, so re-visiting a chapter in the same language
+  // is instant after the first time.
+  useEffect(() => {
+    if (!chapter || !unlocked) return;
+    let cancelled = false;
+    (async () => {
+      setTranslateError("");
+      if (lang === "id") {
+        setDisplayContent(chapter.content);
+        return;
+      }
+      setTranslating(true);
+      try {
+        const translated = await getTranslatedChapter(novelId, chapter.id, lang, chapter.content);
+        if (!cancelled) setDisplayContent(translated);
+      } catch (e) {
+        if (!cancelled) {
+          setTranslateError("Gagal menerjemahkan. Menampilkan teks asli.");
+          setDisplayContent(chapter.content);
+        }
+      }
+      if (!cancelled) setTranslating(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [chapter, unlocked, lang]);
+
+  function handlePickLang(code) {
+    setLang(code);
+    setShowLangSheet(false);
+    updateReadingLang(code);
+  }
 
   function findCurrentRealm(character) {
     if (!novel || !character) return null;
@@ -1834,7 +1952,18 @@ function ReaderScreen({ novelId, chapterId, ctx, onBack }) {
 
   return (
     <div>
-      <TopBar title={novel.title} onBack={onBack} />
+      <TopBar
+        title={novel.title}
+        onBack={onBack}
+        right={
+          <button
+            onClick={() => setShowLangSheet(true)}
+            style={{ border: `1px solid ${C.border}`, background: "transparent", color: C.textSoft, borderRadius: 999, padding: "5px 10px", fontSize: 11, cursor: "pointer", whiteSpace: "nowrap" }}
+          >
+            🌐 {(LANGUAGES.find((l) => l.code === lang) || LANGUAGES[0]).label.split(" ")[0]}
+          </button>
+        }
+      />
       <div style={{ padding: "18px 20px 110px" }}>
         <div style={{ fontSize: 11, color: C.textFaint, marginBottom: 2 }}>
           Bab {chapter.order} dari {chapters.length}
@@ -1843,7 +1972,14 @@ function ReaderScreen({ novelId, chapterId, ctx, onBack }) {
 
         {unlocked ? (
           <>
-            <div style={{ fontSize, lineHeight: 1.85, whiteSpace: "pre-wrap", fontFamily: "'Noto Serif', serif" }}>{renderWithGlossary(chapter.content, novel.characters, novel.worldEntries, setGlossaryPick)}</div>
+            {translating && <div style={{ fontSize: 12, color: C.textFaint, marginBottom: 10 }}>Menerjemahkan…</div>}
+            {translateError && <div style={{ fontSize: 12, color: C.gold, marginBottom: 10 }}>{translateError}</div>}
+            <div style={{ fontSize, lineHeight: 1.85, whiteSpace: "pre-wrap", fontFamily: "'Noto Serif', serif" }}>
+              {lang === "id" ? renderWithGlossary(displayContent || chapter.content, novel.characters, novel.worldEntries, setGlossaryPick) : displayContent || chapter.content}
+            </div>
+            {lang !== "id" && (
+              <div style={{ fontSize: 10.5, color: C.textFaint, marginTop: 10, fontStyle: "italic" }}>Diterjemahkan otomatis. Glosarium karakter/dunia bekerja optimal di Bahasa Indonesia (Asli).</div>
+            )}
             <div style={{ display: "flex", justifyContent: "space-between", marginTop: 30, gap: 10 }}>
               <button disabled={!prev} onClick={() => prev && goTo(prev.id)} style={navBtn(!!prev)}>
                 ← Sebelumnya
@@ -1958,6 +2094,40 @@ function ReaderScreen({ novelId, chapterId, ctx, onBack }) {
               💰
             </div>
           ))}
+        </div>
+      )}
+
+      {showLangSheet && (
+        <div onClick={() => setShowLangSheet(false)} style={overlayStyle()}>
+          <div onClick={(e) => e.stopPropagation()} style={{ ...sheetStyle(), maxHeight: "70vh", overflowY: "auto" }}>
+            <div style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 16, marginBottom: 12 }}>Pilih Bahasa Baca</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {LANGUAGES.map((l) => (
+                <button
+                  key={l.code}
+                  onClick={() => handlePickLang(l.code)}
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    padding: "11px 14px",
+                    borderRadius: 10,
+                    border: `1.5px solid ${lang === l.code ? C.jade : C.border}`,
+                    background: lang === l.code ? C.jadeGlow : "transparent",
+                    color: C.text,
+                    fontSize: 13,
+                    fontWeight: lang === l.code ? 700 : 500,
+                    cursor: "pointer",
+                    textAlign: "left",
+                  }}
+                >
+                  {l.label}
+                  {lang === l.code && <span style={{ color: C.jade }}>✓</span>}
+                </button>
+              ))}
+            </div>
+            <div style={{ fontSize: 10.5, color: C.textFaint, marginTop: 12, lineHeight: 1.5 }}>Terjemahan otomatis, kualitas bisa bervariasi tergantung bahasa.</div>
+          </div>
         </div>
       )}
     </div>
