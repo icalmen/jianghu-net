@@ -431,6 +431,8 @@ function App() {
   // persistence by default) — no more manual localStorage bookkeeping for
   // "who is this device logged in as".
   useEffect(() => {
+    const bootStart = Date.now();
+    const MIN_SPLASH_MS = 1400; // keep the splash screen visible long enough to actually register as a splash, not a flash
     const unsub = window.__jianghuAuth.onAuthStateChanged(async (fbUser) => {
       if (fbUser) {
         setUsername(fbUser.uid);
@@ -439,7 +441,9 @@ function App() {
         setUsername(null);
         setUser(null);
       }
-      setBooting(false);
+      const elapsed = Date.now() - bootStart;
+      const remaining = Math.max(0, MIN_SPLASH_MS - elapsed);
+      setTimeout(() => setBooting(false), remaining);
     });
     return unsub;
   }, []);
@@ -570,6 +574,13 @@ function App() {
     await saveUser(next);
   }
 
+  async function loadDonationConfig() {
+    return gJSON("config:donation", true, { qrisImage: null, bankInfo: "", danaInfo: "", note: "" });
+  }
+  async function saveDonationConfig(config) {
+    await sJSON("config:donation", config, true);
+  }
+
   async function sendPasswordReset() {
     if (!user || !user.email) return { ok: false, error: "Akun ini tidak memakai email/password (mungkin login via Google)." };
     try {
@@ -637,6 +648,7 @@ function App() {
       ratingSum: 0,
       ratingCount: 0,
       commentCount: 0,
+      saves: 0,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -818,6 +830,11 @@ function App() {
     const has = lib.includes(novelId);
     const next = has ? lib.filter((id) => id !== novelId) : [novelId, ...lib];
     await sJSON(`library:${username}`, next, false);
+    const novel = await gJSON(`novel:${novelId}`, true, null);
+    if (novel) {
+      novel.saves = Math.max(0, (novel.saves || 0) + (has ? -1 : 1));
+      await saveNovel(novel);
+    }
     return !has;
   }
 
@@ -837,7 +854,7 @@ function App() {
     return (
       <div style={{ minHeight: "100vh", background: C.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
         <GlobalStyle />
-        <div style={{ textAlign: "center" }}>
+        <div style={{ textAlign: "center", animation: "fadeUp .6s ease" }}>
           <div style={{ fontFamily: "'Ma Shan Zheng', serif", fontSize: 44, color: C.jade }}>江湖</div>
           <div style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 20, color: C.text, marginTop: 6 }}>Jianghu-Net</div>
           <div style={{ color: C.textFaint, fontSize: 11, letterSpacing: 3, marginTop: 10 }}>MEMASUKI JIANGHU…</div>
@@ -861,6 +878,8 @@ function App() {
     doGoogleSignIn,
     updateDisplayName,
     updateReadingLang,
+    loadDonationConfig,
+    saveDonationConfig,
     sendPasswordReset,
     deleteAccount,
     doLogout,
@@ -1015,6 +1034,7 @@ function ScreenRouter({ entry, ctx, onBack }) {
       {screen === "distribution" && <DistributionScreen novelId={params.novelId} ctx={ctx} onBack={onBack} />}
       {screen === "legal" && <LegalScreen onBack={onBack} />}
       {screen === "settings" && <SettingsScreen ctx={ctx} onBack={onBack} />}
+      {screen === "donate" && <DonateScreen ctx={ctx} onBack={onBack} />}
     </div>
   );
 }
@@ -1076,6 +1096,17 @@ function HomeScreen({ ctx }) {
   const [search, setSearch] = useState("");
   const hero = novels.slice(0, 5);
 
+  // Shuffled once per mount so "Rekomendasi Untukmu" feels different each
+  // visit without needing real personalization/recommendation logic yet.
+  const shuffledPick = useMemo(() => {
+    const arr = [...novels];
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr.slice(0, 6);
+  }, [novels.length]);
+
   useEffect(() => {
     if (hero.length < 2) return;
     const t = setInterval(() => setHeroIdx((i) => (i + 1) % hero.length), 4200);
@@ -1085,6 +1116,11 @@ function HomeScreen({ ctx }) {
   const tetua = [...novels].sort((a, b) => (b.tips || 0) - (a.tips || 0)).slice(0, 6);
   const pendatangBaru = [...novels].sort((a, b) => b.createdAt - a.createdAt).slice(0, 6);
   const terlaris = [...novels].sort((a, b) => (b.reads || 0) - (a.reads || 0)).slice(0, 6);
+  const disukaiPembaca = [...novels]
+    .filter((n) => (n.ratingCount || 0) > 0)
+    .sort((a, b) => b.ratingSum / b.ratingCount - a.ratingSum / a.ratingCount)
+    .slice(0, 6);
+  const banyakDisimpan = [...novels].filter((n) => (n.saves || 0) > 0).sort((a, b) => (b.saves || 0) - (a.saves || 0)).slice(0, 6);
 
   const q = search.trim().toLowerCase();
   const searchResults = q
@@ -1129,7 +1165,7 @@ function HomeScreen({ ctx }) {
           {searchResults.length === 0 && <div style={{ fontSize: 13, color: C.textSoft, textAlign: "center", padding: "30px 0" }}>Tidak ada cerita yang cocok. Coba kata kunci lain.</div>}
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {searchResults.map((n) => (
-              <NovelListCard key={n.id} novel={n} onOpen={() => push("story", { novelId: n.id })} />
+              <NovelListCard key={n.id} novel={n} onOpen={() => push("story", { novelId: n.id })} showReads />
             ))}
           </div>
         </div>
@@ -1189,13 +1225,101 @@ function HomeScreen({ ctx }) {
             </div>
           )}
 
-          {tetua.length > 0 && <NovelRow title="Rekomendasi Tetua" subtitle="Curated pick dari sesepuh sekte" novels={tetua} ctx={ctx} />}
-          {pendatangBaru.length > 0 && <NovelRow title="Pakar Pendatang Baru" subtitle="Karya terbaru di Jianghu" novels={pendatangBaru} ctx={ctx} />}
-          {terlaris.length > 0 && <NovelRow title="Kitab Terlaris" subtitle="Paling banyak dibaca pendekar" novels={terlaris} ctx={ctx} />}
+          {tetua.length > 0 && <FeedSection title="Rekomendasi Tetua" subtitle="Curated pick dari sesepuh sekte" novels={tetua} ctx={ctx} />}
+          {pendatangBaru.length > 0 && <FeedSection title="Pakar Pendatang Baru" subtitle="Karya terbaru di Jianghu" novels={pendatangBaru} ctx={ctx} />}
+          {terlaris.length > 0 && <FeedSection title="Kitab Terlaris" subtitle="Paling banyak dibaca pendekar" novels={terlaris} ctx={ctx} />}
+          {disukaiPembaca.length > 0 && <FeedSection title="Kitab yang Pembaca Suka" subtitle="Rating tertinggi dari pendekar lain" novels={disukaiPembaca} ctx={ctx} />}
+          {banyakDisimpan.length > 0 && <FeedSection title="Banyak Disimpan Pembaca" subtitle="Favorit yang sering ditandai" novels={banyakDisimpan} ctx={ctx} />}
+          {shuffledPick.length > 0 && <FeedSection title="Rekomendasi Untukmu" subtitle="Coba jelajahi sesuatu yang baru" novels={shuffledPick} ctx={ctx} />}
+
+          <ShareAppSection />
         </>
       )}
     </div>
   );
+}
+
+function FeedSection({ title, subtitle, novels, ctx }) {
+  const { push } = ctx;
+  return (
+    <div style={{ marginTop: 24, padding: "0 18px" }}>
+      <div style={{ marginBottom: 10 }}>
+        <div style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 15 }}>{title}</div>
+        <div style={{ fontSize: 11, color: C.textFaint }}>{subtitle}</div>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {novels.map((n) => (
+          <NovelListCard key={n.id} novel={n} onOpen={() => push("story", { novelId: n.id })} showReads />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const SHARE_TEXT = "Yuk baca & tulis cerita silat di Jianghu-Net! 江湖";
+const SHARE_URL = typeof window !== "undefined" ? window.location.href : "";
+
+function ShareAppSection() {
+  const [copied, setCopied] = useState(false);
+
+  async function shareNative() {
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: "Jianghu-Net", text: SHARE_TEXT, url: SHARE_URL });
+      } catch (e) {
+        /* user cancelled — no-op */
+      }
+    }
+  }
+
+  function openShare(url) {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+
+  function copyLink() {
+    navigator.clipboard
+      .writeText(SHARE_URL)
+      .then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      })
+      .catch(() => {});
+  }
+
+  const encodedText = encodeURIComponent(SHARE_TEXT + " " + SHARE_URL);
+  const encodedUrl = encodeURIComponent(SHARE_URL);
+
+  return (
+    <div style={{ margin: "34px 18px 10px", padding: 18, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 16, textAlign: "center" }}>
+      <div style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 15, marginBottom: 4 }}>Suka Jianghu-Net?</div>
+      <div style={{ fontSize: 12, color: C.textSoft, marginBottom: 16 }}>Ajak sesama pendekar bergabung</div>
+      <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
+        <button onClick={() => openShare(`https://wa.me/?text=${encodedText}`)} style={shareBtnStyle("#25D366")}>
+          WhatsApp
+        </button>
+        <button onClick={() => openShare(`https://t.me/share/url?url=${encodedUrl}&text=${encodeURIComponent(SHARE_TEXT)}`)} style={shareBtnStyle("#26A5E4")}>
+          Telegram
+        </button>
+        <button onClick={() => openShare(`https://www.facebook.com/sharer/sharer.php?u=${encodedUrl}`)} style={shareBtnStyle("#1877F2")}>
+          Facebook
+        </button>
+        <button onClick={() => openShare(`https://twitter.com/intent/tweet?text=${encodedText}`)} style={shareBtnStyle("#111")}>
+          X
+        </button>
+        {typeof navigator !== "undefined" && navigator.share && (
+          <button onClick={shareNative} style={shareBtnStyle(C.jade)}>
+            Lainnya
+          </button>
+        )}
+      </div>
+      <button onClick={copyLink} style={{ marginTop: 12, background: "none", border: "none", color: C.textFaint, fontSize: 11.5, cursor: "pointer", textDecoration: "underline" }}>
+        {copied ? "Tautan disalin!" : "Salin tautan aplikasi"}
+      </button>
+    </div>
+  );
+}
+function shareBtnStyle(color) {
+  return { padding: "9px 14px", borderRadius: 999, border: "none", background: color, color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" };
 }
 
 function FloatingParticles() {
@@ -1310,7 +1434,7 @@ function GenreListScreen({ genreId, ctx, onBack }) {
   );
 }
 
-function NovelListCard({ novel, onOpen }) {
+function NovelListCard({ novel, onOpen, showReads }) {
   return (
     <div onClick={onOpen} style={{ display: "flex", gap: 12, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 12, cursor: "pointer" }}>
       <CoverThumb novel={novel} size="sm" radius={8} />
@@ -1322,7 +1446,12 @@ function NovelListCard({ novel, onOpen }) {
             <span style={{ fontSize: 9, fontWeight: 700, color: C.jade, background: C.jadeGlow, padding: "1px 7px", borderRadius: 999 }}>{novel.genre}</span>
           )}
         </div>
-        <div style={{ fontSize: 11.5, color: C.textSoft, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", lineHeight: 1.4 }}>{novel.synopsis}</div>
+        <div style={{ fontSize: 11.5, color: C.textSoft, display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden", lineHeight: 1.4 }}>{novel.synopsis}</div>
+        {showReads && (
+          <div style={{ fontSize: 10, color: C.textFaint, marginTop: 6 }}>
+            👁 {fmt(novel.reads || 0)} dibaca {novel.ratingCount ? `· ⭐ ${(novel.ratingSum / novel.ratingCount).toFixed(1)}` : ""}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2150,7 +2279,7 @@ function sheetStyle() {
    WALLET
 ================================================================ */
 function WalletScreen({ ctx, onBack }) {
-  const { username, user, buyStones, purchaseTier, showToast } = ctx;
+  const { username, user, buyStones, purchaseTier, showToast, push } = ctx;
 
   async function handleTier(tierId) {
     const r = await purchaseTier(tierId);
@@ -2205,6 +2334,13 @@ function WalletScreen({ ctx, onBack }) {
         })}
       </div>
 
+      <button
+        onClick={() => push("donate", {})}
+        style={{ width: "100%", marginTop: 20, padding: "12px 0", borderRadius: 10, border: `1.5px solid ${C.gold}`, background: "transparent", color: C.gold, fontWeight: 700, fontSize: 13, cursor: "pointer" }}
+      >
+        🙏 Dukung Pengembang Aplikasi
+      </button>
+
       <div style={{ fontSize: 10.5, color: C.textFaint, marginTop: 18, textAlign: "center", lineHeight: 1.6 }}>Transaksi di halaman ini bersifat simulasi untuk pengujian aplikasi.</div>
     </div>
   );
@@ -2243,14 +2379,130 @@ function EmptyState({ ctx, title, body, cta, onCta }) {
 }
 
 /* ================================================================
+   DONATE — Support the developer (separate from in-app Batu Spiritual)
+================================================================ */
+function DonateScreen({ ctx, onBack }) {
+  const { loadDonationConfig, showToast } = ctx;
+  const [config, setConfig] = useState(null);
+  const [copiedField, setCopiedField] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      setConfig(await loadDonationConfig());
+    })();
+  }, []);
+
+  function copyText(text, field) {
+    navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        setCopiedField(field);
+        setTimeout(() => setCopiedField(""), 2000);
+      })
+      .catch(() => showToast("Gagal menyalin."));
+  }
+
+  if (!config) return <TopBar title="Dukung Pengembang" onBack={onBack} />;
+
+  const hasAny = config.qrisImage || config.bankInfo || config.danaInfo;
+
+  return (
+    <div>
+      <TopBar title="Dukung Pengembang" onBack={onBack} />
+      <div style={{ padding: 20, textAlign: "center" }}>
+        <span style={{ fontSize: 40 }}>🙏</span>
+        <div style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 17, marginTop: 10 }}>Suka dengan Jianghu-Net?</div>
+        <div style={{ fontSize: 12.5, color: C.textSoft, marginTop: 6, lineHeight: 1.6, marginBottom: 22 }}>
+          Dukungan ini langsung ke pengembang aplikasi, terpisah dari sistem Batu Spiritual di dalam aplikasi. Setiap dukungan sangat berarti untuk pengembangan lebih lanjut.
+        </div>
+
+        {!hasAny && <div style={{ fontSize: 12.5, color: C.textFaint, padding: "20px 0" }}>Pengembang belum menambahkan info donasi.</div>}
+
+        {config.qrisImage && (
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: C.textSoft, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>Scan QRIS</div>
+            <img src={config.qrisImage} alt="QRIS" style={{ width: 220, height: 220, objectFit: "contain", background: "#fff", borderRadius: 12, padding: 10 }} />
+          </div>
+        )}
+
+        {config.bankInfo && (
+          <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 14, marginBottom: 12, textAlign: "left" }}>
+            <div style={{ fontSize: 10.5, color: C.textFaint, marginBottom: 4, textTransform: "uppercase" }}>Transfer Bank</div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+              <div style={{ fontSize: 13.5, fontWeight: 700 }}>{config.bankInfo}</div>
+              <button onClick={() => copyText(config.bankInfo, "bank")} style={{ border: `1px solid ${C.jade}`, background: "transparent", color: C.jade, borderRadius: 8, padding: "5px 10px", fontSize: 11, cursor: "pointer", flexShrink: 0 }}>
+                {copiedField === "bank" ? "Tersalin!" : "Salin"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {config.danaInfo && (
+          <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 14, marginBottom: 12, textAlign: "left" }}>
+            <div style={{ fontSize: 10.5, color: C.textFaint, marginBottom: 4, textTransform: "uppercase" }}>DANA</div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+              <div style={{ fontSize: 13.5, fontWeight: 700 }}>{config.danaInfo}</div>
+              <button onClick={() => copyText(config.danaInfo, "dana")} style={{ border: `1px solid ${C.jade}`, background: "transparent", color: C.jade, borderRadius: 8, padding: "5px 10px", fontSize: 11, cursor: "pointer", flexShrink: 0 }}>
+                {copiedField === "dana" ? "Tersalin!" : "Salin"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {config.note && <div style={{ fontSize: 11.5, color: C.textFaint, marginTop: 14, lineHeight: 1.6 }}>{config.note}</div>}
+      </div>
+    </div>
+  );
+}
+
+/* ================================================================
    SETTINGS — Account & App
 ================================================================ */
 function SettingsScreen({ ctx, onBack }) {
-  const { user, updateDisplayName, sendPasswordReset, deleteAccount, doLogout, showToast, push } = ctx;
+  const { user, updateDisplayName, sendPasswordReset, deleteAccount, doLogout, showToast, push, loadDonationConfig, saveDonationConfig } = ctx;
   const [nameDraft, setNameDraft] = useState(user ? user.displayName : "");
   const [savingName, setSavingName] = useState(false);
   const [resetBusy, setResetBusy] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
+
+  const [donationConfig, setDonationConfig] = useState(null);
+  const [bankInfo, setBankInfo] = useState("");
+  const [danaInfo, setDanaInfo] = useState("");
+  const [note, setNote] = useState("");
+  const [qrisImage, setQrisImage] = useState(null);
+  const [uploadingQris, setUploadingQris] = useState(false);
+  const [savingDonation, setSavingDonation] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      const c = await loadDonationConfig();
+      setDonationConfig(c);
+      setBankInfo(c.bankInfo || "");
+      setDanaInfo(c.danaInfo || "");
+      setNote(c.note || "");
+      setQrisImage(c.qrisImage || null);
+    })();
+  }, []);
+
+  async function handleQrisChange(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setUploadingQris(true);
+    try {
+      const dataUrl = await fileToResizedDataURL(file, 500, 500, 0.85);
+      setQrisImage(dataUrl);
+    } catch (err) {
+      showToast("Gagal memproses gambar QRIS.");
+    }
+    setUploadingQris(false);
+  }
+
+  async function handleSaveDonation() {
+    setSavingDonation(true);
+    await saveDonationConfig({ bankInfo, danaInfo, note, qrisImage });
+    setSavingDonation(false);
+    showToast("Info donasi tersimpan.");
+  }
 
   async function handleSaveName() {
     if (!nameDraft.trim()) return;
@@ -2309,6 +2561,44 @@ function SettingsScreen({ ctx, onBack }) {
             {resetBusy ? "Mengirim…" : "Kirim Tautan Reset Password"}
           </button>
         )}
+
+        <MenuRow label="Dukung Pengembang" onClick={() => push("donate", {})} />
+
+        <BambooDivider />
+
+        <div style={{ fontWeight: 700, fontSize: 13.5, margin: "18px 0 6px" }}>Info Donasi (Pengembang)</div>
+        <div style={{ fontSize: 11, color: C.textFaint, marginBottom: 14, lineHeight: 1.5 }}>
+          Bagian ini untuk pengembang aplikasi mengisi info QRIS/rekening/DANA yang akan tampil di halaman "Dukung Pengembang" untuk semua pembaca.
+        </div>
+
+        <Field label="QRIS">
+          <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
+            {qrisImage ? (
+              <img src={qrisImage} alt="QRIS" style={{ width: 70, height: 70, objectFit: "contain", background: "#fff", borderRadius: 8 }} />
+            ) : (
+              <div style={{ width: 70, height: 70, borderRadius: 8, background: C.surfaceHi, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: C.textFaint, textAlign: "center" }}>
+                Belum ada
+              </div>
+            )}
+            <label style={{ display: "inline-block", padding: "9px 16px", borderRadius: 999, border: `1.5px solid ${C.jade}`, color: C.jade, fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+              {uploadingQris ? "Memproses…" : "Upload QRIS"}
+              <input type="file" accept="image/*" onChange={handleQrisChange} style={{ display: "none" }} disabled={uploadingQris} />
+            </label>
+          </div>
+        </Field>
+
+        <Field label="Info Rekening Bank">
+          <input value={bankInfo} onChange={(e) => setBankInfo(e.target.value)} placeholder="Contoh: BCA 1234567890 a.n. Nama Kamu" style={inputStyle()} />
+        </Field>
+        <Field label="Info DANA">
+          <input value={danaInfo} onChange={(e) => setDanaInfo(e.target.value)} placeholder="Contoh: 08123456789 a.n. Nama Kamu" style={inputStyle()} />
+        </Field>
+        <Field label="Catatan Tambahan (opsional)">
+          <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={3} placeholder="Contoh: Terima kasih atas dukungannya!" style={{ ...inputStyle(), resize: "vertical" }} />
+        </Field>
+        <button onClick={handleSaveDonation} disabled={savingDonation} style={{ width: "100%", padding: "11px 0", borderRadius: 10, border: "none", background: C.gold, color: "#241a04", fontWeight: 800, fontSize: 13, cursor: "pointer", marginBottom: 20 }}>
+          {savingDonation ? "Menyimpan…" : "Simpan Info Donasi"}
+        </button>
 
         <BambooDivider />
 
