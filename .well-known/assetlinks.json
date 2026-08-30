@@ -3,6 +3,6 @@
       "target": {
         "namespace": "android_app",
         "package_name": "io.github.icalmen.twa",
-        "sha256_cert_fingerprints": ["10:FF:37:EE:0C:16:D2:0D:3C:F8:4D:73:7C:40:E1:88:FC:D1:CD:67:D4:92:CA:F6:E3:65:9C:40:7C:A6:AE:E7"]
+        "sha256_cert_fingerprints": ["10:52:47:BF:CF:07:41:17:2B:01:19:DE:F4:56:7F:DC:2F:14:64:D4:77:6E:FE:CE:F3:75:0D:06:65:BA:EA:82"]
       }
     }]
