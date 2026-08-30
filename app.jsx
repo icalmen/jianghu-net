@@ -1226,8 +1226,8 @@ function HomeScreen({ ctx }) {
           )}
 
           {tetua.length > 0 && <FeedSection title="Rekomendasi Tetua" subtitle="Curated pick dari sesepuh sekte" novels={tetua} ctx={ctx} />}
-          {pendatangBaru.length > 0 && <FeedSection title="Pakar Pendatang Baru" subtitle="Karya terbaru di Jianghu" novels={pendatangBaru} ctx={ctx} />}
-          {terlaris.length > 0 && <FeedSection title="Kitab Terlaris" subtitle="Paling banyak dibaca pendekar" novels={terlaris} ctx={ctx} />}
+          {pendatangBaru.length > 0 && <NovelRow title="Pakar Pendatang Baru" subtitle="Karya terbaru di Jianghu" novels={pendatangBaru} ctx={ctx} />}
+          {terlaris.length > 0 && <NovelRow title="Kitab Terlaris" subtitle="Paling banyak dibaca pendekar" novels={terlaris} ctx={ctx} />}
           {disukaiPembaca.length > 0 && <FeedSection title="Kitab yang Pembaca Suka" subtitle="Rating tertinggi dari pendekar lain" novels={disukaiPembaca} ctx={ctx} />}
           {banyakDisimpan.length > 0 && <FeedSection title="Banyak Disimpan Pembaca" subtitle="Favorit yang sering ditandai" novels={banyakDisimpan} ctx={ctx} />}
           {shuffledPick.length > 0 && <FeedSection title="Rekomendasi Untukmu" subtitle="Coba jelajahi sesuatu yang baru" novels={shuffledPick} ctx={ctx} />}
@@ -1260,28 +1260,34 @@ const SHARE_TEXT = "Yuk baca & tulis cerita silat di Jianghu-Net! 江湖";
 const SHARE_URL = typeof window !== "undefined" ? window.location.href : "";
 
 function ShareAppSection() {
-  const [copied, setCopied] = useState(false);
+  const [message, setMessage] = useState("");
 
-  async function shareNative() {
+  async function shareNative(fallbackPlatform) {
     if (navigator.share) {
       try {
         await navigator.share({ title: "Jianghu-Net", text: SHARE_TEXT, url: SHARE_URL });
+        return;
       } catch (e) {
-        /* user cancelled — no-op */
+        return; // user cancelled the native share sheet — no fallback needed
       }
     }
+    // No native share sheet available (most desktop browsers): Instagram and
+    // TikTok don't offer a public "share to" web URL like WhatsApp/Telegram
+    // do, so the best we can do is copy the link and ask the person to paste
+    // it into their Story/post/bio manually.
+    copyLink(`Tautan disalin! Tempel di ${fallbackPlatform} kamu.`);
   }
 
   function openShare(url) {
     window.open(url, "_blank", "noopener,noreferrer");
   }
 
-  function copyLink() {
+  function copyLink(customMessage) {
     navigator.clipboard
       .writeText(SHARE_URL)
       .then(() => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
+        setMessage(customMessage || "Tautan disalin!");
+        setTimeout(() => setMessage(""), 2500);
       })
       .catch(() => {});
   }
@@ -1306,14 +1312,21 @@ function ShareAppSection() {
         <button onClick={() => openShare(`https://twitter.com/intent/tweet?text=${encodedText}`)} style={shareBtnStyle("#111")}>
           X
         </button>
+        <button onClick={() => shareNative("Instagram")} style={shareBtnStyle("#C13584")}>
+          Instagram
+        </button>
+        <button onClick={() => shareNative("TikTok")} style={shareBtnStyle("#010101")}>
+          TikTok
+        </button>
         {typeof navigator !== "undefined" && navigator.share && (
-          <button onClick={shareNative} style={shareBtnStyle(C.jade)}>
+          <button onClick={() => shareNative("aplikasi lain")} style={shareBtnStyle(C.jade)}>
             Lainnya
           </button>
         )}
       </div>
-      <button onClick={copyLink} style={{ marginTop: 12, background: "none", border: "none", color: C.textFaint, fontSize: 11.5, cursor: "pointer", textDecoration: "underline" }}>
-        {copied ? "Tautan disalin!" : "Salin tautan aplikasi"}
+      {message && <div style={{ marginTop: 12, fontSize: 11.5, color: C.jade, fontWeight: 700 }}>{message}</div>}
+      <button onClick={() => copyLink()} style={{ marginTop: 12, background: "none", border: "none", color: C.textFaint, fontSize: 11.5, cursor: "pointer", textDecoration: "underline" }}>
+        Salin tautan aplikasi
       </button>
     </div>
   );
