@@ -1022,6 +1022,7 @@ function ScreenRouter({ entry, ctx, onBack }) {
     <div style={{ minHeight: "100vh" }}>
       {screen === "story" && <StoryDetailScreen novelId={params.novelId} ctx={ctx} onBack={onBack} />}
       {screen === "genreList" && <GenreListScreen genreId={params.genreId} ctx={ctx} onBack={onBack} />}
+      {screen === "categoryList" && <CategoryListScreen categoryId={params.categoryId} ctx={ctx} onBack={onBack} />}
       {screen === "reader" && <ReaderScreen novelId={params.novelId} chapterId={params.chapterId} ctx={ctx} onBack={onBack} />}
       {screen === "wallet" && <WalletScreen ctx={ctx} onBack={onBack} />}
       {screen === "login" && <LoginScreen ctx={ctx} onBack={onBack} params={params} />}
@@ -1090,22 +1091,49 @@ function Field({ label, children }) {
 /* ================================================================
    HOME — Dunia Persilatan
 ================================================================ */
+const CATEGORY_META = {
+  tetua: { title: "Rekomendasi Tetua", subtitle: "Curated pick dari sesepuh sekte" },
+  baru: { title: "Pakar Pendatang Baru", subtitle: "Karya terbaru di Jianghu" },
+  terlaris: { title: "Kitab Terlaris", subtitle: "Paling banyak dibaca pendekar" },
+  disukai: { title: "Kitab yang Pembaca Suka", subtitle: "Rating tertinggi dari pendekar lain" },
+  disimpan: { title: "Banyak Disimpan Pembaca", subtitle: "Favorit yang sering ditandai" },
+  rekomendasi: { title: "Rekomendasi Untukmu", subtitle: "Coba jelajahi sesuatu yang baru" },
+};
+
+function getCategoryList(categoryId, novels) {
+  switch (categoryId) {
+    case "tetua":
+      return [...novels].sort((a, b) => (b.tips || 0) - (a.tips || 0));
+    case "baru":
+      return [...novels].sort((a, b) => b.createdAt - a.createdAt);
+    case "terlaris":
+      return [...novels].sort((a, b) => (b.reads || 0) - (a.reads || 0));
+    case "disukai":
+      return [...novels].filter((n) => (n.ratingCount || 0) > 0).sort((a, b) => b.ratingSum / b.ratingCount - a.ratingSum / a.ratingCount);
+    case "disimpan":
+      return [...novels].filter((n) => (n.saves || 0) > 0).sort((a, b) => (b.saves || 0) - (a.saves || 0));
+    case "rekomendasi": {
+      const arr = [...novels];
+      for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+      }
+      return arr;
+    }
+    default:
+      return novels;
+  }
+}
+
 function HomeScreen({ ctx }) {
   const { novels, loadingCatalog, push } = ctx;
   const [heroIdx, setHeroIdx] = useState(0);
   const [search, setSearch] = useState("");
+  const [genreFilter, setGenreFilter] = useState(null);
+  const touchStartX = useRef(null);
   const hero = novels.slice(0, 5);
 
-  // Shuffled once per mount so "Rekomendasi Untukmu" feels different each
-  // visit without needing real personalization/recommendation logic yet.
-  const shuffledPick = useMemo(() => {
-    const arr = [...novels];
-    for (let i = arr.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [arr[i], arr[j]] = [arr[j], arr[i]];
-    }
-    return arr.slice(0, 6);
-  }, [novels.length]);
+  const shuffledPick = useMemo(() => getCategoryList("rekomendasi", novels).slice(0, 6), [novels.length]);
 
   useEffect(() => {
     if (hero.length < 2) return;
@@ -1113,19 +1141,30 @@ function HomeScreen({ ctx }) {
     return () => clearInterval(t);
   }, [hero.length]);
 
-  const tetua = [...novels].sort((a, b) => (b.tips || 0) - (a.tips || 0)).slice(0, 6);
-  const pendatangBaru = [...novels].sort((a, b) => b.createdAt - a.createdAt).slice(0, 6);
-  const terlaris = [...novels].sort((a, b) => (b.reads || 0) - (a.reads || 0)).slice(0, 6);
-  const disukaiPembaca = [...novels]
-    .filter((n) => (n.ratingCount || 0) > 0)
-    .sort((a, b) => b.ratingSum / b.ratingCount - a.ratingSum / a.ratingCount)
-    .slice(0, 6);
-  const banyakDisimpan = [...novels].filter((n) => (n.saves || 0) > 0).sort((a, b) => (b.saves || 0) - (a.saves || 0)).slice(0, 6);
+  function handleHeroTouchStart(e) {
+    touchStartX.current = e.touches[0].clientX;
+  }
+  function handleHeroTouchEnd(e) {
+    if (touchStartX.current === null) return;
+    const deltaX = e.changedTouches[0].clientX - touchStartX.current;
+    if (Math.abs(deltaX) > 40 && hero.length > 1) {
+      setHeroIdx((i) => (deltaX < 0 ? (i + 1) % hero.length : (i - 1 + hero.length) % hero.length));
+    }
+    touchStartX.current = null;
+  }
+
+  const tetua = getCategoryList("tetua", novels).slice(0, 6);
+  const pendatangBaru = getCategoryList("baru", novels).slice(0, 6);
+  const terlaris = getCategoryList("terlaris", novels).slice(0, 6);
+  const disukaiPembaca = getCategoryList("disukai", novels).slice(0, 6);
+  const banyakDisimpan = getCategoryList("disimpan", novels).slice(0, 6);
 
   const q = search.trim().toLowerCase();
   const searchResults = q
     ? novels.filter((n) => n.title.toLowerCase().includes(q) || (n.authorName || "").toLowerCase().includes(q) || (n.genre || "").toLowerCase().includes(q))
     : [];
+  const genreResults = genreFilter ? novels.filter((n) => n.genre === GENRES.find((g) => g.id === genreFilter).label) : [];
+  const showingFilteredView = !!q || !!genreFilter;
 
   return (
     <div>
@@ -1141,7 +1180,10 @@ function HomeScreen({ ctx }) {
         <div style={{ position: "relative", marginTop: 14 }}>
           <input
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              if (e.target.value.trim()) setGenreFilter(null);
+            }}
             placeholder="Cari judul, penulis, atau aliran…"
             style={{ ...inputStyle(), paddingLeft: 34 }}
           />
@@ -1155,16 +1197,68 @@ function HomeScreen({ ctx }) {
             </button>
           )}
         </div>
+
+        {!q && (
+          <div style={{ display: "flex", gap: 7, overflowX: "auto", marginTop: 12, paddingBottom: 2, scrollbarWidth: "none" }}>
+            <button
+              onClick={() => setGenreFilter(null)}
+              style={{
+                whiteSpace: "nowrap",
+                padding: "6px 13px",
+                borderRadius: 999,
+                border: `1.5px solid ${!genreFilter ? C.jade : C.border}`,
+                background: !genreFilter ? C.jadeGlow : "transparent",
+                color: !genreFilter ? C.jade : C.textSoft,
+                fontSize: 11.5,
+                fontWeight: 700,
+                cursor: "pointer",
+                flexShrink: 0,
+              }}
+            >
+              Semua
+            </button>
+            {GENRES.map((g) => (
+              <button
+                key={g.id}
+                onClick={() => setGenreFilter(genreFilter === g.id ? null : g.id)}
+                style={{
+                  whiteSpace: "nowrap",
+                  padding: "6px 13px",
+                  borderRadius: 999,
+                  border: `1.5px solid ${genreFilter === g.id ? C.jade : C.border}`,
+                  background: genreFilter === g.id ? C.jadeGlow : "transparent",
+                  color: genreFilter === g.id ? C.jade : C.textSoft,
+                  fontSize: 11.5,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  flexShrink: 0,
+                }}
+              >
+                {g.label}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
-      {q ? (
+      {showingFilteredView ? (
         <div style={{ padding: "14px 18px 24px" }}>
           <div style={{ fontSize: 12, color: C.textFaint, marginBottom: 12 }}>
-            {searchResults.length} hasil untuk "{search.trim()}"
+            {q ? (
+              <>
+                {searchResults.length} hasil untuk "{search.trim()}"
+              </>
+            ) : (
+              <>
+                {genreResults.length} cerita di aliran {GENRES.find((g) => g.id === genreFilter).label}
+              </>
+            )}
           </div>
-          {searchResults.length === 0 && <div style={{ fontSize: 13, color: C.textSoft, textAlign: "center", padding: "30px 0" }}>Tidak ada cerita yang cocok. Coba kata kunci lain.</div>}
+          {(q ? searchResults : genreResults).length === 0 && (
+            <div style={{ fontSize: 13, color: C.textSoft, textAlign: "center", padding: "30px 0" }}>Tidak ada cerita yang cocok.</div>
+          )}
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {searchResults.map((n) => (
+            {(q ? searchResults : genreResults).map((n) => (
               <NovelListCard key={n.id} novel={n} onOpen={() => push("story", { novelId: n.id })} showReads />
             ))}
           </div>
@@ -1174,6 +1268,8 @@ function HomeScreen({ ctx }) {
           {hero.length > 0 && (
             <div
               onClick={() => push("story", { novelId: hero[heroIdx].id })}
+              onTouchStart={handleHeroTouchStart}
+              onTouchEnd={handleHeroTouchEnd}
               style={{
                 margin: "14px 18px 0",
                 height: 170,
@@ -1181,6 +1277,7 @@ function HomeScreen({ ctx }) {
                 position: "relative",
                 overflow: "hidden",
                 cursor: "pointer",
+                touchAction: "pan-y",
                 background: hero[heroIdx].coverImage
                   ? `url("${hero[heroIdx].coverImage}") center/cover`
                   : `linear-gradient(135deg, ${C.jadeDeep} 0%, #0c1f16 60%, ${C.bg} 100%)`,
@@ -1225,12 +1322,12 @@ function HomeScreen({ ctx }) {
             </div>
           )}
 
-          {tetua.length > 0 && <FeedSection title="Rekomendasi Tetua" subtitle="Curated pick dari sesepuh sekte" novels={tetua} ctx={ctx} />}
-          {pendatangBaru.length > 0 && <NovelRow title="Pakar Pendatang Baru" subtitle="Karya terbaru di Jianghu" novels={pendatangBaru} ctx={ctx} />}
-          {terlaris.length > 0 && <NovelRow title="Kitab Terlaris" subtitle="Paling banyak dibaca pendekar" novels={terlaris} ctx={ctx} />}
-          {disukaiPembaca.length > 0 && <FeedSection title="Kitab yang Pembaca Suka" subtitle="Rating tertinggi dari pendekar lain" novels={disukaiPembaca} ctx={ctx} />}
-          {banyakDisimpan.length > 0 && <FeedSection title="Banyak Disimpan Pembaca" subtitle="Favorit yang sering ditandai" novels={banyakDisimpan} ctx={ctx} />}
-          {shuffledPick.length > 0 && <FeedSection title="Rekomendasi Untukmu" subtitle="Coba jelajahi sesuatu yang baru" novels={shuffledPick} ctx={ctx} />}
+          {pendatangBaru.length > 0 && <NovelRow categoryId="baru" novels={pendatangBaru} ctx={ctx} />}
+          {terlaris.length > 0 && <NovelRow categoryId="terlaris" novels={terlaris} ctx={ctx} />}
+          {tetua.length > 0 && <FeedSection categoryId="tetua" novels={tetua} ctx={ctx} />}
+          {disukaiPembaca.length > 0 && <FeedSection categoryId="disukai" novels={disukaiPembaca} ctx={ctx} />}
+          {banyakDisimpan.length > 0 && <FeedSection categoryId="disimpan" novels={banyakDisimpan} ctx={ctx} />}
+          {shuffledPick.length > 0 && <FeedSection categoryId="rekomendasi" novels={shuffledPick} ctx={ctx} />}
 
           <ShareAppSection />
         </>
@@ -1239,14 +1336,47 @@ function HomeScreen({ ctx }) {
   );
 }
 
-function FeedSection({ title, subtitle, novels, ctx }) {
+function CategoryListScreen({ categoryId, ctx, onBack }) {
+  const { novels, push } = ctx;
+  const meta = CATEGORY_META[categoryId] || { title: "Kategori", subtitle: "" };
+  const list = getCategoryList(categoryId, novels);
+
+  return (
+    <div>
+      <TopBar title={meta.title} onBack={onBack} />
+      <div style={{ padding: 18 }}>
+        <div style={{ fontSize: 12, color: C.textFaint, marginBottom: 16 }}>{meta.subtitle}</div>
+        {list.length === 0 && <div style={{ fontSize: 13, color: C.textSoft, textAlign: "center", padding: "30px 0" }}>Belum ada cerita di kategori ini.</div>}
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {list.map((n) => (
+            <NovelListCard key={n.id} novel={n} onOpen={() => push("story", { novelId: n.id })} showReads />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CategoryHeader({ categoryId, ctx }) {
+  const meta = CATEGORY_META[categoryId] || { title: "", subtitle: "" };
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 10 }}>
+      <div>
+        <div style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 15 }}>{meta.title}</div>
+        <div style={{ fontSize: 11, color: C.textFaint }}>{meta.subtitle}</div>
+      </div>
+      <button onClick={() => ctx.push("categoryList", { categoryId })} style={{ background: "none", border: "none", color: C.jade, fontSize: 11.5, fontWeight: 700, cursor: "pointer", flexShrink: 0, padding: 0 }}>
+        Lihat Semua ›
+      </button>
+    </div>
+  );
+}
+
+function FeedSection({ categoryId, novels, ctx }) {
   const { push } = ctx;
   return (
     <div style={{ marginTop: 24, padding: "0 18px" }}>
-      <div style={{ marginBottom: 10 }}>
-        <div style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 15 }}>{title}</div>
-        <div style={{ fontSize: 11, color: C.textFaint }}>{subtitle}</div>
-      </div>
+      <CategoryHeader categoryId={categoryId} ctx={ctx} />
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {novels.map((n) => (
           <NovelListCard key={n.id} novel={n} onOpen={() => push("story", { novelId: n.id })} showReads />
@@ -1309,14 +1439,8 @@ function ShareAppSection() {
         <button onClick={() => openShare(`https://www.facebook.com/sharer/sharer.php?u=${encodedUrl}`)} style={shareBtnStyle("#1877F2")}>
           Facebook
         </button>
-        <button onClick={() => openShare(`https://twitter.com/intent/tweet?text=${encodedText}`)} style={shareBtnStyle("#111")}>
-          X
-        </button>
         <button onClick={() => shareNative("Instagram")} style={shareBtnStyle("#C13584")}>
           Instagram
-        </button>
-        <button onClick={() => shareNative("TikTok")} style={shareBtnStyle("#010101")}>
-          TikTok
         </button>
         {typeof navigator !== "undefined" && navigator.share && (
           <button onClick={() => shareNative("aplikasi lain")} style={shareBtnStyle(C.jade)}>
@@ -1352,15 +1476,12 @@ function FloatingParticles() {
   );
 }
 
-function NovelRow({ title, subtitle, novels, ctx }) {
+function NovelRow({ categoryId, novels, ctx }) {
   const { push } = ctx;
   return (
-    <div style={{ marginTop: 22 }}>
-      <div style={{ padding: "0 18px", marginBottom: 10 }}>
-        <div style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 15 }}>{title}</div>
-        <div style={{ fontSize: 11, color: C.textFaint }}>{subtitle}</div>
-      </div>
-      <div style={{ display: "flex", gap: 12, overflowX: "auto", padding: "0 18px 4px", scrollbarWidth: "none" }}>
+    <div style={{ marginTop: 22, padding: "0 18px" }}>
+      <CategoryHeader categoryId={categoryId} ctx={ctx} />
+      <div style={{ display: "flex", gap: 12, overflowX: "auto", margin: "0 -18px", padding: "0 18px 4px", scrollbarWidth: "none" }}>
         {novels.map((n) => (
           <div key={n.id} onClick={() => push("story", { novelId: n.id })} style={{ width: 110, flexShrink: 0, cursor: "pointer" }}>
             <div style={{ marginBottom: 6, position: "relative" }}>
