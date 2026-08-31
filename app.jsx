@@ -117,6 +117,14 @@ const LANGUAGES = [
   { code: "hi", label: "हिन्दी" },
 ];
 
+// GANTI dengan email akun Google/email-password milikmu sendiri. Hanya akun
+// dengan email PERSIS ini yang akan melihat menu "Panel Admin" di aplikasi,
+// DAN — yang lebih penting — hanya email ini yang diizinkan menyimpan
+// dokumen config:* (info donasi, pengumuman) oleh Firestore Rules di server.
+// Mengganti nilai ini saja TIDAK CUKUP; kamu juga wajib menyalin string yang
+// SAMA PERSIS ke Firestore Rules (lihat instruksi di chat).
+const ADMIN_EMAIL = "icalmen@gmail.com";
+
 function uid(p) {
   return `${p}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 }
@@ -469,6 +477,7 @@ function App() {
         joinedAt: Date.now(),
       };
       await sJSON(`user:${uid}`, u, true);
+      await addToUsersIndex(u);
     }
     setUser(u);
     return u;
@@ -476,6 +485,33 @@ function App() {
   async function saveUser(next) {
     setUser(next);
     await sJSON(`user:${next.uid}`, next, true);
+  }
+
+  // Lightweight directory so the admin panel can search/select a reader to
+  // grant a bonus to, without needing a real backend query capability.
+  async function addToUsersIndex(u) {
+    const idx = await gJSON("users:index", true, []);
+    if (idx.some((x) => x.uid === u.uid)) return;
+    idx.push({ uid: u.uid, displayName: u.displayName, email: u.email || "" });
+    await sJSON("users:index", idx.slice(-2000), true);
+  }
+  async function loadUsersIndex() {
+    return gJSON("users:index", true, []);
+  }
+  async function grantBonus(targetUid, amount) {
+    const target = await gJSON(`user:${targetUid}`, true, null);
+    if (!target) return { ok: false, error: "Pengguna tidak ditemukan." };
+    target.stones = (target.stones || 0) + amount;
+    await sJSON(`user:${targetUid}`, target, true);
+    if (targetUid === username) setUser(target);
+    return { ok: true };
+  }
+
+  async function loadAnnouncement() {
+    return gJSON("config:announcement", true, { text: "", active: false });
+  }
+  async function saveAnnouncement(config) {
+    await sJSON("config:announcement", config, true);
   }
 
   async function doGoogleSignIn() {
@@ -538,6 +574,7 @@ function App() {
         joinedAt: Date.now(),
       };
       await sJSON(`user:${uid}`, u, true);
+      await addToUsersIndex(u);
       setUser(u);
       showToast(`Selamat datang di Jianghu, ${u.displayName}!`);
       return { ok: true };
@@ -867,6 +904,7 @@ function App() {
     C,
     username,
     user,
+    isAdmin: !!(user && user.email && user.email === ADMIN_EMAIL),
     novels,
     loadingCatalog,
     push,
@@ -880,6 +918,10 @@ function App() {
     updateReadingLang,
     loadDonationConfig,
     saveDonationConfig,
+    loadUsersIndex,
+    grantBonus,
+    loadAnnouncement,
+    saveAnnouncement,
     sendPasswordReset,
     deleteAccount,
     doLogout,
@@ -1036,6 +1078,7 @@ function ScreenRouter({ entry, ctx, onBack }) {
       {screen === "legal" && <LegalScreen onBack={onBack} />}
       {screen === "settings" && <SettingsScreen ctx={ctx} onBack={onBack} />}
       {screen === "donate" && <DonateScreen ctx={ctx} onBack={onBack} />}
+      {screen === "admin" && <AdminScreen ctx={ctx} onBack={onBack} />}
     </div>
   );
 }
@@ -1126,12 +1169,21 @@ function getCategoryList(categoryId, novels) {
 }
 
 function HomeScreen({ ctx }) {
-  const { novels, loadingCatalog, push } = ctx;
+  const { novels, loadingCatalog, push, loadAnnouncement } = ctx;
   const [heroIdx, setHeroIdx] = useState(0);
   const [search, setSearch] = useState("");
   const [genreFilter, setGenreFilter] = useState(null);
+  const [announcement, setAnnouncement] = useState(null);
+  const [announcementDismissed, setAnnouncementDismissed] = useState(false);
   const touchStartX = useRef(null);
   const hero = novels.slice(0, 5);
+
+  useEffect(() => {
+    (async () => {
+      const a = await loadAnnouncement();
+      if (a && a.active && a.text) setAnnouncement(a);
+    })();
+  }, []);
 
   const shuffledPick = useMemo(() => getCategoryList("rekomendasi", novels).slice(0, 6), [novels.length]);
 
@@ -1169,6 +1221,15 @@ function HomeScreen({ ctx }) {
   return (
     <div>
       <FloatingParticles />
+      {announcement && !announcementDismissed && (
+        <div style={{ margin: "14px 18px 0", background: C.goldGlow, border: `1.5px solid ${C.gold}`, borderRadius: 12, padding: "12px 14px", display: "flex", gap: 10, alignItems: "flex-start" }}>
+          <span style={{ fontSize: 16, flexShrink: 0 }}>📢</span>
+          <div style={{ flex: 1, fontSize: 12, color: C.text, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{announcement.text}</div>
+          <button onClick={() => setAnnouncementDismissed(true)} style={{ background: "none", border: "none", color: C.textFaint, fontSize: 15, cursor: "pointer", flexShrink: 0, padding: 0 }}>
+            ✕
+          </button>
+        </div>
+      )}
       <div style={{ padding: "18px 18px 6px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <span style={{ fontFamily: "'Ma Shan Zheng', serif", fontSize: 34, color: C.jade, lineHeight: 1 }}>江湖</span>
@@ -1736,7 +1797,7 @@ function LeaderboardScreen({ ctx }) {
    PROFILE — Status Kultivasi
 ================================================================ */
 function ProfileScreen({ ctx, username, doLogout }) {
-  const { user, push } = ctx;
+  const { user, push, isAdmin } = ctx;
   if (!username) {
     return <EmptyState ctx={ctx} title="Belum Terdaftar di Jianghu" body="Masuk untuk melacak status kultivasi, saldo Batu Spiritual, dan pencapaianmu." cta="Masuk / Daftar" onCta={() => push("login", {})} />;
   }
@@ -1781,6 +1842,7 @@ function ProfileScreen({ ctx, username, doLogout }) {
       <MenuRow label="Ruang Meditasi (Studio Penulis)" onClick={() => push("studio", {})} />
       <MenuRow label="Pengaturan Aplikasi & Akun" onClick={() => push("settings", {})} />
       <MenuRow label="Kebijakan Privasi & Ketentuan" onClick={() => push("legal", {})} />
+      {isAdmin && <MenuRow label="⚙ Panel Admin" onClick={() => push("admin", {})} />}
 
       <button onClick={doLogout} style={{ width: "100%", marginTop: 22, padding: "12px 0", borderRadius: 10, border: `1.5px solid ${C.danger}`, background: "transparent", color: C.danger, fontWeight: 700, fontSize: 13.5, cursor: "pointer" }}>
         Keluar dari Jianghu
@@ -2513,6 +2575,233 @@ function EmptyState({ ctx, title, body, cta, onCta }) {
 }
 
 /* ================================================================
+   ADMIN — Developer-only panel (donation info, announcements, bonuses)
+   Gated in the UI by ctx.isAdmin, and ALSO enforced server-side by
+   Firestore Rules checking request.auth.token.email — the UI gate alone
+   is not real security, it's just a nicer experience for the one person
+   who is actually allowed to save these documents.
+================================================================ */
+function AdminScreen({ ctx, onBack }) {
+  const { isAdmin, showToast, loadDonationConfig, saveDonationConfig, loadAnnouncement, saveAnnouncement, loadUsersIndex, grantBonus } = ctx;
+
+  const [tab, setTab] = useState("donasi");
+
+  // Donation config
+  const [bankInfo, setBankInfo] = useState("");
+  const [danaInfo, setDanaInfo] = useState("");
+  const [note, setNote] = useState("");
+  const [qrisImage, setQrisImage] = useState(null);
+  const [uploadingQris, setUploadingQris] = useState(false);
+  const [savingDonation, setSavingDonation] = useState(false);
+
+  // Announcement
+  const [annText, setAnnText] = useState("");
+  const [annActive, setAnnActive] = useState(false);
+  const [savingAnn, setSavingAnn] = useState(false);
+
+  // Bonus
+  const [usersIndex, setUsersIndex] = useState([]);
+  const [userQuery, setUserQuery] = useState("");
+  const [selectedUser, setSelectedUser] = useState(null);
+  const [bonusAmount, setBonusAmount] = useState(100);
+  const [grantingBonus, setGrantingBonus] = useState(false);
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    (async () => {
+      const dc = await loadDonationConfig();
+      setBankInfo(dc.bankInfo || "");
+      setDanaInfo(dc.danaInfo || "");
+      setNote(dc.note || "");
+      setQrisImage(dc.qrisImage || null);
+
+      const ac = await loadAnnouncement();
+      setAnnText(ac.text || "");
+      setAnnActive(!!ac.active);
+
+      setUsersIndex(await loadUsersIndex());
+    })();
+  }, [isAdmin]);
+
+  if (!isAdmin) {
+    return (
+      <div>
+        <TopBar title="Panel Admin" onBack={onBack} />
+        <div style={{ padding: 30, textAlign: "center", color: C.textSoft, fontSize: 13 }}>Akses ditolak. Halaman ini khusus pengembang aplikasi.</div>
+      </div>
+    );
+  }
+
+  async function handleQrisChange(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setUploadingQris(true);
+    try {
+      setQrisImage(await fileToResizedDataURL(file, 500, 500, 0.85));
+    } catch (err) {
+      showToast("Gagal memproses gambar QRIS.");
+    }
+    setUploadingQris(false);
+  }
+  async function handleSaveDonation() {
+    setSavingDonation(true);
+    await saveDonationConfig({ bankInfo, danaInfo, note, qrisImage });
+    setSavingDonation(false);
+    showToast("Info donasi tersimpan.");
+  }
+
+  async function handleSaveAnnouncement() {
+    setSavingAnn(true);
+    await saveAnnouncement({ text: annText, active: annActive, updatedAt: Date.now() });
+    setSavingAnn(false);
+    showToast("Pengumuman tersimpan.");
+  }
+
+  const filteredUsers = userQuery.trim()
+    ? usersIndex.filter((u) => u.displayName.toLowerCase().includes(userQuery.toLowerCase()) || (u.email || "").toLowerCase().includes(userQuery.toLowerCase()))
+    : [];
+
+  async function handleGrantBonus() {
+    if (!selectedUser || !bonusAmount) return;
+    setGrantingBonus(true);
+    const r = await grantBonus(selectedUser.uid, Number(bonusAmount));
+    setGrantingBonus(false);
+    showToast(r.ok ? `${bonusAmount} 💎 diberikan ke ${selectedUser.displayName}.` : r.error);
+    if (r.ok) setSelectedUser(null);
+  }
+
+  return (
+    <div>
+      <TopBar title="Panel Admin" onBack={onBack} />
+      <div style={{ padding: "0 18px" }}>
+        <div style={{ display: "flex", gap: 6, padding: "12px 0", overflowX: "auto" }}>
+          {[
+            { id: "donasi", label: "Info Donasi" },
+            { id: "pengumuman", label: "Pengumuman" },
+            { id: "bonus", label: "Beri Bonus" },
+          ].map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              style={{
+                whiteSpace: "nowrap",
+                padding: "8px 14px",
+                borderRadius: 999,
+                border: `1.5px solid ${tab === t.id ? C.jade : C.border}`,
+                background: tab === t.id ? C.jadeGlow : "transparent",
+                color: tab === t.id ? C.jade : C.textSoft,
+                fontSize: 12,
+                fontWeight: 700,
+                cursor: "pointer",
+                flexShrink: 0,
+              }}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {tab === "donasi" && (
+        <div style={{ padding: 18 }}>
+          <Field label="QRIS">
+            <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
+              {qrisImage ? (
+                <img src={qrisImage} alt="QRIS" style={{ width: 70, height: 70, objectFit: "contain", background: "#fff", borderRadius: 8 }} />
+              ) : (
+                <div style={{ width: 70, height: 70, borderRadius: 8, background: C.surfaceHi, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: C.textFaint, textAlign: "center" }}>
+                  Belum ada
+                </div>
+              )}
+              <label style={{ display: "inline-block", padding: "9px 16px", borderRadius: 999, border: `1.5px solid ${C.jade}`, color: C.jade, fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                {uploadingQris ? "Memproses…" : "Upload QRIS"}
+                <input type="file" accept="image/*" onChange={handleQrisChange} style={{ display: "none" }} disabled={uploadingQris} />
+              </label>
+            </div>
+          </Field>
+          <Field label="Info Rekening Bank">
+            <input value={bankInfo} onChange={(e) => setBankInfo(e.target.value)} placeholder="Contoh: BCA 1234567890 a.n. Nama Kamu" style={inputStyle()} />
+          </Field>
+          <Field label="Info DANA">
+            <input value={danaInfo} onChange={(e) => setDanaInfo(e.target.value)} placeholder="Contoh: 08123456789 a.n. Nama Kamu" style={inputStyle()} />
+          </Field>
+          <Field label="Catatan Tambahan (opsional)">
+            <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={3} style={{ ...inputStyle(), resize: "vertical" }} />
+          </Field>
+          <button onClick={handleSaveDonation} disabled={savingDonation} style={{ width: "100%", padding: "12px 0", borderRadius: 10, border: "none", background: C.gold, color: "#241a04", fontWeight: 800, fontSize: 13, cursor: "pointer" }}>
+            {savingDonation ? "Menyimpan…" : "Simpan Info Donasi"}
+          </button>
+        </div>
+      )}
+
+      {tab === "pengumuman" && (
+        <div style={{ padding: 18 }}>
+          <div style={{ fontSize: 11.5, color: C.textFaint, marginBottom: 14, lineHeight: 1.5 }}>Pengumuman aktif akan tampil sebagai banner di paling atas beranda untuk semua pembaca.</div>
+          <Field label="Isi Pengumuman">
+            <textarea value={annText} onChange={(e) => setAnnText(e.target.value)} rows={4} placeholder="Contoh: Server maintenance tanggal 1 September, mohon maaf atas ketidaknyamanannya." style={{ ...inputStyle(), resize: "vertical" }} />
+          </Field>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 10, padding: "12px 14px", marginBottom: 16 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 700 }}>Tampilkan ke Pembaca</div>
+            <Toggle checked={annActive} onChange={setAnnActive} />
+          </div>
+          <button onClick={handleSaveAnnouncement} disabled={savingAnn} style={{ width: "100%", padding: "12px 0", borderRadius: 10, border: "none", background: C.jade, color: "#08170f", fontWeight: 800, fontSize: 13, cursor: "pointer" }}>
+            {savingAnn ? "Menyimpan…" : "Simpan Pengumuman"}
+          </button>
+        </div>
+      )}
+
+      {tab === "bonus" && (
+        <div style={{ padding: 18 }}>
+          <div style={{ fontSize: 11.5, color: C.textFaint, marginBottom: 14, lineHeight: 1.5 }}>Cari pembaca berdasarkan nama pena atau email untuk memberi bonus Batu Spiritual gratis.</div>
+          <Field label="Cari Pengguna">
+            <input
+              value={userQuery}
+              onChange={(e) => {
+                setUserQuery(e.target.value);
+                setSelectedUser(null);
+              }}
+              placeholder="Ketik nama pena atau email…"
+              style={inputStyle()}
+            />
+          </Field>
+          {userQuery.trim() && !selectedUser && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16, maxHeight: 200, overflowY: "auto" }}>
+              {filteredUsers.length === 0 && <div style={{ fontSize: 12, color: C.textFaint }}>Tidak ditemukan.</div>}
+              {filteredUsers.map((u) => (
+                <div
+                  key={u.uid}
+                  onClick={() => setSelectedUser(u)}
+                  style={{ padding: "10px 12px", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, cursor: "pointer" }}
+                >
+                  <div style={{ fontSize: 13, fontWeight: 700 }}>{u.displayName}</div>
+                  <div style={{ fontSize: 10.5, color: C.textFaint }}>{u.email}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          {selectedUser && (
+            <div style={{ background: C.jadeGlow, border: `1.5px solid ${C.jade}`, borderRadius: 10, padding: 12, marginBottom: 16 }}>
+              <div style={{ fontSize: 13, fontWeight: 700 }}>{selectedUser.displayName}</div>
+              <div style={{ fontSize: 10.5, color: C.textFaint }}>{selectedUser.email}</div>
+            </div>
+          )}
+          <Field label="Jumlah Batu Spiritual">
+            <input type="number" min={1} value={bonusAmount} onChange={(e) => setBonusAmount(e.target.value)} style={inputStyle()} />
+          </Field>
+          <button
+            onClick={handleGrantBonus}
+            disabled={!selectedUser || grantingBonus}
+            style={{ width: "100%", padding: "12px 0", borderRadius: 10, border: "none", background: C.gold, color: "#241a04", fontWeight: 800, fontSize: 13, cursor: "pointer", opacity: selectedUser ? 1 : 0.6 }}
+          >
+            {grantingBonus ? "Memproses…" : `Beri ${bonusAmount || 0} 💎`}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ================================================================
    DONATE — Support the developer (separate from in-app Batu Spiritual)
 ================================================================ */
 function DonateScreen({ ctx, onBack }) {
@@ -2593,50 +2882,11 @@ function DonateScreen({ ctx, onBack }) {
    SETTINGS — Account & App
 ================================================================ */
 function SettingsScreen({ ctx, onBack }) {
-  const { user, updateDisplayName, sendPasswordReset, deleteAccount, doLogout, showToast, push, loadDonationConfig, saveDonationConfig } = ctx;
+  const { user, updateDisplayName, sendPasswordReset, deleteAccount, doLogout, showToast, push, isAdmin } = ctx;
   const [nameDraft, setNameDraft] = useState(user ? user.displayName : "");
   const [savingName, setSavingName] = useState(false);
   const [resetBusy, setResetBusy] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
-
-  const [donationConfig, setDonationConfig] = useState(null);
-  const [bankInfo, setBankInfo] = useState("");
-  const [danaInfo, setDanaInfo] = useState("");
-  const [note, setNote] = useState("");
-  const [qrisImage, setQrisImage] = useState(null);
-  const [uploadingQris, setUploadingQris] = useState(false);
-  const [savingDonation, setSavingDonation] = useState(false);
-
-  useEffect(() => {
-    (async () => {
-      const c = await loadDonationConfig();
-      setDonationConfig(c);
-      setBankInfo(c.bankInfo || "");
-      setDanaInfo(c.danaInfo || "");
-      setNote(c.note || "");
-      setQrisImage(c.qrisImage || null);
-    })();
-  }, []);
-
-  async function handleQrisChange(e) {
-    const file = e.target.files && e.target.files[0];
-    if (!file) return;
-    setUploadingQris(true);
-    try {
-      const dataUrl = await fileToResizedDataURL(file, 500, 500, 0.85);
-      setQrisImage(dataUrl);
-    } catch (err) {
-      showToast("Gagal memproses gambar QRIS.");
-    }
-    setUploadingQris(false);
-  }
-
-  async function handleSaveDonation() {
-    setSavingDonation(true);
-    await saveDonationConfig({ bankInfo, danaInfo, note, qrisImage });
-    setSavingDonation(false);
-    showToast("Info donasi tersimpan.");
-  }
 
   async function handleSaveName() {
     if (!nameDraft.trim()) return;
@@ -2697,42 +2947,7 @@ function SettingsScreen({ ctx, onBack }) {
         )}
 
         <MenuRow label="Dukung Pengembang" onClick={() => push("donate", {})} />
-
-        <BambooDivider />
-
-        <div style={{ fontWeight: 700, fontSize: 13.5, margin: "18px 0 6px" }}>Info Donasi (Pengembang)</div>
-        <div style={{ fontSize: 11, color: C.textFaint, marginBottom: 14, lineHeight: 1.5 }}>
-          Bagian ini untuk pengembang aplikasi mengisi info QRIS/rekening/DANA yang akan tampil di halaman "Dukung Pengembang" untuk semua pembaca.
-        </div>
-
-        <Field label="QRIS">
-          <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
-            {qrisImage ? (
-              <img src={qrisImage} alt="QRIS" style={{ width: 70, height: 70, objectFit: "contain", background: "#fff", borderRadius: 8 }} />
-            ) : (
-              <div style={{ width: 70, height: 70, borderRadius: 8, background: C.surfaceHi, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: C.textFaint, textAlign: "center" }}>
-                Belum ada
-              </div>
-            )}
-            <label style={{ display: "inline-block", padding: "9px 16px", borderRadius: 999, border: `1.5px solid ${C.jade}`, color: C.jade, fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
-              {uploadingQris ? "Memproses…" : "Upload QRIS"}
-              <input type="file" accept="image/*" onChange={handleQrisChange} style={{ display: "none" }} disabled={uploadingQris} />
-            </label>
-          </div>
-        </Field>
-
-        <Field label="Info Rekening Bank">
-          <input value={bankInfo} onChange={(e) => setBankInfo(e.target.value)} placeholder="Contoh: BCA 1234567890 a.n. Nama Kamu" style={inputStyle()} />
-        </Field>
-        <Field label="Info DANA">
-          <input value={danaInfo} onChange={(e) => setDanaInfo(e.target.value)} placeholder="Contoh: 08123456789 a.n. Nama Kamu" style={inputStyle()} />
-        </Field>
-        <Field label="Catatan Tambahan (opsional)">
-          <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={3} placeholder="Contoh: Terima kasih atas dukungannya!" style={{ ...inputStyle(), resize: "vertical" }} />
-        </Field>
-        <button onClick={handleSaveDonation} disabled={savingDonation} style={{ width: "100%", padding: "11px 0", borderRadius: 10, border: "none", background: C.gold, color: "#241a04", fontWeight: 800, fontSize: 13, cursor: "pointer", marginBottom: 20 }}>
-          {savingDonation ? "Menyimpan…" : "Simpan Info Donasi"}
-        </button>
+        {isAdmin && <MenuRow label="⚙ Panel Admin" onClick={() => push("admin", {})} />}
 
         <BambooDivider />
 
