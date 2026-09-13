@@ -159,7 +159,7 @@ const LANGUAGES = [
 // dokumen config:* (info donasi, pengumuman) oleh Firestore Rules di server.
 // Mengganti nilai ini saja TIDAK CUKUP; kamu juga wajib menyalin string yang
 // SAMA PERSIS ke Firestore Rules (lihat instruksi di chat).
-const ADMIN_EMAIL = "gantidenganemailkamu@gmail.com";
+const ADMIN_EMAIL = "icalmen@gmail.com";
 
 function uid(p) {
   return `${p}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
