@@ -29,7 +29,7 @@ const { useState, useEffect, useRef, useMemo } = React;
    broken open. Reading progress renders as a tapering "blade bar".
 ================================================================ */
 
-const C = {
+const DARK_THEME = {
   bg: "#121212",
   surface: "#1B1B1B",
   surfaceRaised: "#232323",
@@ -46,6 +46,42 @@ const C = {
   textFaint: "#6B6760",
   danger: "#C0392B",
 };
+
+const LIGHT_THEME = {
+  bg: "#F5F0E3",
+  surface: "#FFFFFF",
+  surfaceRaised: "#F1E9D5",
+  surfaceHi: "#E8DDC0",
+  border: "#DCD0AF",
+  jade: "#00875A",
+  jadeDeep: "#00623F",
+  jadeGlow: "rgba(0,135,90,0.12)",
+  gold: "#A8790A",
+  goldDeep: "#8B6508",
+  goldGlow: "rgba(168,121,10,0.14)",
+  text: "#241F1C",
+  textSoft: "#5C5346",
+  textFaint: "#8A8072",
+  danger: "#C0392B",
+};
+
+// C is intentionally a plain mutable object (not reassigned, only its
+// properties are overwritten by applyTheme) so every place in this file
+// that reads C.bg / C.jade / etc. at render time automatically picks up
+// the current theme — no need to thread color props through every
+// component. Switching themes then just needs to force React to re-render
+// the whole tree once (done via a `key` on the root wrapper in App()).
+let SAVED_THEME_MODE = "dark";
+try {
+  SAVED_THEME_MODE = (typeof localStorage !== "undefined" && localStorage.getItem("jianghu_theme")) || "dark";
+} catch (e) {}
+const C = { ...(SAVED_THEME_MODE === "light" ? LIGHT_THEME : DARK_THEME) };
+function applyTheme(mode) {
+  Object.assign(C, mode === "light" ? LIGHT_THEME : DARK_THEME);
+  try {
+    localStorage.setItem("jianghu_theme", mode);
+  } catch (e) {}
+}
 
 const GENRES = [
   { id: "wuxia", label: "Wuxia Murni", glyph: "俠" },
@@ -123,7 +159,7 @@ const LANGUAGES = [
 // dokumen config:* (info donasi, pengumuman) oleh Firestore Rules di server.
 // Mengganti nilai ini saja TIDAK CUKUP; kamu juga wajib menyalin string yang
 // SAMA PERSIS ke Firestore Rules (lihat instruksi di chat).
-const ADMIN_EMAIL = "icalmen@gmail.com";
+const ADMIN_EMAIL = "gantidenganemailkamu@gmail.com";
 
 function uid(p) {
   return `${p}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
@@ -409,6 +445,7 @@ function App() {
   // pen name people actually see is `user.displayName`.
   const [username, setUsername] = useState(null);
   const [user, setUser] = useState(null);
+  const [themeMode, setThemeMode] = useState(SAVED_THEME_MODE);
 
   const [tab, setTab] = useState("home");
   const [stack, setStack] = useState([]);
@@ -440,7 +477,7 @@ function App() {
   // "who is this device logged in as".
   useEffect(() => {
     const bootStart = Date.now();
-    const MIN_SPLASH_MS = 1400; // keep the splash screen visible long enough to actually register as a splash, not a flash
+    const MIN_SPLASH_MS = 500; // keep the splash screen visible just long enough to not flash instantly
     const unsub = window.__jianghuAuth.onAuthStateChanged(async (fbUser) => {
       if (fbUser) {
         setUsername(fbUser.uid);
@@ -530,11 +567,11 @@ function App() {
   async function loadCatalog() {
     setLoadingCatalog(true);
     const ids = await gJSON("catalog:index", true, []);
-    const list = [];
-    for (const id of ids) {
-      const n = await gJSON(`novel:${id}`, true, null);
-      if (n) list.push(n);
-    }
+    // Fetch every novel in parallel instead of one at a time — a sequential
+    // loop here means load time grows linearly with catalog size (10 novels
+    // = 10x the wait), which was the single biggest cause of slow startup.
+    const results = await Promise.all(ids.map((id) => gJSON(`novel:${id}`, true, null)));
+    const list = results.filter(Boolean);
     list.sort((a, b) => b.updatedAt - a.updatedAt);
     setNovels(list);
     setLoadingCatalog(false);
@@ -611,6 +648,22 @@ function App() {
     await saveUser(next);
   }
 
+  function setTheme(mode) {
+    applyTheme(mode);
+    setThemeMode(mode);
+    if (user) saveUser({ ...user, themeMode: mode });
+  }
+
+  // If the logged-in profile has a saved theme preference that differs from
+  // what this device currently shows (e.g. switched from another device),
+  // sync to it once after login.
+  useEffect(() => {
+    if (user && user.themeMode && user.themeMode !== themeMode) {
+      applyTheme(user.themeMode);
+      setThemeMode(user.themeMode);
+    }
+  }, [user && user.uid]);
+
   async function loadDonationConfig() {
     return gJSON("config:donation", true, { qrisImage: null, bankInfo: "", danaInfo: "", note: "" });
   }
@@ -676,6 +729,7 @@ function App() {
       coverImage: coverImage || null,
       author: username,
       authorName: (user && user.displayName) || "Pendekar",
+      status: "ongoing",
       chapterIds: [],
       frameworks: [],
       characters: [],
@@ -686,6 +740,9 @@ function App() {
       ratingCount: 0,
       commentCount: 0,
       saves: 0,
+      lastChapterTitle: null,
+      lastChapterOrder: 0,
+      lastChapterUpdatedAt: 0,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -719,11 +776,28 @@ function App() {
     };
     await sJSON(`chapter:${novelId}:${id}`, chapter, true);
     novel.chapterIds.push(id);
+    // Only real chapter publications bump "last updated" — tips, ratings,
+    // comments, and library saves also call saveNovel() but shouldn't make
+    // a story look freshly updated in the "Update Cersil" feed.
+    if (chapter.status === "published") {
+      novel.lastChapterTitle = chapter.title;
+      novel.lastChapterOrder = chapter.order;
+      novel.lastChapterUpdatedAt = Date.now();
+    }
     await saveNovel(novel);
     return chapter;
   }
   async function updateChapter(chapter) {
     await sJSON(`chapter:${chapter.novelId}:${chapter.id}`, chapter, true);
+    if (chapter.status === "published") {
+      const novel = await gJSON(`novel:${chapter.novelId}`, true, null);
+      if (novel) {
+        novel.lastChapterTitle = chapter.title;
+        novel.lastChapterOrder = chapter.order;
+        novel.lastChapterUpdatedAt = Date.now();
+        await saveNovel(novel);
+      }
+    }
   }
 
   async function unlockChapter(novel, chapter) {
@@ -905,6 +979,8 @@ function App() {
     username,
     user,
     isAdmin: !!(user && user.email && user.email === ADMIN_EMAIL),
+    themeMode,
+    setTheme,
     novels,
     loadingCatalog,
     push,
@@ -950,7 +1026,7 @@ function App() {
   };
 
   return (
-    <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "'Noto Serif', serif", color: C.text, display: "flex", justifyContent: "center" }}>
+    <div key={themeMode} style={{ minHeight: "100vh", background: C.bg, fontFamily: "'Noto Serif', serif", color: C.text, display: "flex", justifyContent: "center" }}>
       <GlobalStyle />
       <div style={{ width: "100%", maxWidth: 480, position: "relative", minHeight: "100vh", background: C.bg }}>
         {current ? (
@@ -1135,16 +1211,21 @@ function Field({ label, children }) {
    HOME — Dunia Persilatan
 ================================================================ */
 const CATEGORY_META = {
+  updateCersil: { title: "Update Cersil", subtitle: "Bab terbaru yang baru terbit" },
   tetua: { title: "Rekomendasi Tetua", subtitle: "Curated pick dari sesepuh sekte" },
   baru: { title: "Pakar Pendatang Baru", subtitle: "Karya terbaru di Jianghu" },
   terlaris: { title: "Kitab Terlaris", subtitle: "Paling banyak dibaca pendekar" },
   disukai: { title: "Kitab yang Pembaca Suka", subtitle: "Rating tertinggi dari pendekar lain" },
   disimpan: { title: "Banyak Disimpan Pembaca", subtitle: "Favorit yang sering ditandai" },
   rekomendasi: { title: "Rekomendasi Untukmu", subtitle: "Coba jelajahi sesuatu yang baru" },
+  tuntas: { title: "Kitab Tuntas", subtitle: "Perjalanan yang sudah usai" },
+  bintangFajar: { title: "Bintang Fajar", subtitle: "Pendatang baru yang sedang naik daun" },
 };
 
 function getCategoryList(categoryId, novels) {
   switch (categoryId) {
+    case "updateCersil":
+      return [...novels].filter((n) => n.lastChapterUpdatedAt).sort((a, b) => b.lastChapterUpdatedAt - a.lastChapterUpdatedAt);
     case "tetua":
       return [...novels].sort((a, b) => (b.tips || 0) - (a.tips || 0));
     case "baru":
@@ -1155,6 +1236,12 @@ function getCategoryList(categoryId, novels) {
       return [...novels].filter((n) => (n.ratingCount || 0) > 0).sort((a, b) => b.ratingSum / b.ratingCount - a.ratingSum / a.ratingCount);
     case "disimpan":
       return [...novels].filter((n) => (n.saves || 0) > 0).sort((a, b) => (b.saves || 0) - (a.saves || 0));
+    case "tuntas":
+      return [...novels].filter((n) => n.status === "completed").sort((a, b) => (b.reads || 0) - (a.reads || 0));
+    case "bintangFajar": {
+      const cutoff = Date.now() - 14 * 86400000;
+      return [...novels].filter((n) => n.createdAt >= cutoff).sort((a, b) => (b.reads || 0) + (b.tips || 0) - ((a.reads || 0) + (a.tips || 0)));
+    }
     case "rekomendasi": {
       const arr = [...novels];
       for (let i = arr.length - 1; i > 0; i--) {
@@ -1205,6 +1292,7 @@ function HomeScreen({ ctx }) {
     touchStartX.current = null;
   }
 
+  const updateCersil = getCategoryList("updateCersil", novels).slice(0, 6);
   const tetua = getCategoryList("tetua", novels).slice(0, 6);
   const pendatangBaru = getCategoryList("baru", novels).slice(0, 6);
   const terlaris = getCategoryList("terlaris", novels).slice(0, 6);
@@ -1383,6 +1471,7 @@ function HomeScreen({ ctx }) {
             </div>
           )}
 
+          {updateCersil.length > 0 && <NovelRow categoryId="updateCersil" novels={updateCersil} ctx={ctx} subtitleMode="lastChapter" />}
           {pendatangBaru.length > 0 && <NovelRow categoryId="baru" novels={pendatangBaru} ctx={ctx} />}
           {terlaris.length > 0 && <NovelRow categoryId="terlaris" novels={terlaris} ctx={ctx} />}
           {tetua.length > 0 && <FeedSection categoryId="tetua" novels={tetua} ctx={ctx} />}
@@ -1537,7 +1626,7 @@ function FloatingParticles() {
   );
 }
 
-function NovelRow({ categoryId, novels, ctx }) {
+function NovelRow({ categoryId, novels, ctx, subtitleMode }) {
   const { push } = ctx;
   return (
     <div style={{ marginTop: 22, padding: "0 18px" }}>
@@ -1570,7 +1659,13 @@ function NovelRow({ categoryId, novels, ctx }) {
               )}
             </div>
             <div style={{ fontSize: 12, fontWeight: 700, lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{n.title}</div>
-            <div style={{ fontSize: 10, color: C.textFaint, marginTop: 2 }}>{n.authorName}</div>
+            {subtitleMode === "lastChapter" ? (
+              <div style={{ fontSize: 9.5, color: C.jade, marginTop: 2, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                Bab {n.lastChapterOrder} · {timeAgo(n.lastChapterUpdatedAt)}
+              </div>
+            ) : (
+              <div style={{ fontSize: 10, color: C.textFaint, marginTop: 2 }}>{n.authorName}</div>
+            )}
           </div>
         ))}
       </div>
@@ -1702,14 +1797,17 @@ function LibraryScreen({ ctx }) {
             const total = novel.chapterIds.length || 1;
             const pct = Math.min(100, Math.round((progress.lastOrder / total) * 100));
             return (
-              <div key={novel.id} onClick={() => push("story", { novelId: novel.id })} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 14, cursor: "pointer" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-                  <span style={{ fontWeight: 700, fontSize: 13.5 }}>{novel.title}</span>
-                  <span style={{ fontSize: 11, color: C.textFaint, fontFamily: "'IBM Plex Mono', monospace" }}>{pct}%</span>
-                </div>
-                <BladeProgress pct={pct} />
-                <div style={{ fontSize: 10.5, color: C.textFaint, marginTop: 6 }}>
-                  Bab {progress.lastOrder} dari {total}
+              <div key={novel.id} onClick={() => push("story", { novelId: novel.id })} style={{ display: "flex", gap: 12, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 14, cursor: "pointer" }}>
+                <CoverThumb novel={novel} size="sm" radius={8} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, gap: 8 }}>
+                    <span style={{ fontWeight: 700, fontSize: 13.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{novel.title}</span>
+                    <span style={{ fontSize: 11, color: C.textFaint, fontFamily: "'IBM Plex Mono', monospace", flexShrink: 0 }}>{pct}%</span>
+                  </div>
+                  <BladeProgress pct={pct} />
+                  <div style={{ fontSize: 10.5, color: C.textFaint, marginTop: 6 }}>
+                    Bab {progress.lastOrder} dari {total}
+                  </div>
                 </div>
               </div>
             );
@@ -1739,13 +1837,25 @@ function SubTabBtn({ label, active, onClick }) {
 /* ================================================================
    LEADERBOARD — Daftar Pendekar Langit
 ================================================================ */
+const LEADERBOARD_TABS = [
+  { id: "pusaka", label: "Pedang Pusaka", glyph: "劍" },
+  { id: "terlaris", label: "Melegenda", glyph: "傳" },
+  { id: "tuntas", label: "Tuntas", glyph: "完" },
+  { id: "baru", label: "Turun Gunung", glyph: "新" },
+  { id: "bintangFajar", label: "Bintang Fajar", glyph: "曉" },
+  { id: "disukai", label: "Restu Pendekar", glyph: "譽" },
+];
+
 function LeaderboardScreen({ ctx }) {
-  const { push } = ctx;
+  const { push, novels } = ctx;
+  const [activeTab, setActiveTab] = useState("pusaka");
+  const [genreFilter, setGenreFilter] = useState(null);
   const [range, setRange] = useState("weekly");
   const [ranking, setRanking] = useState([]);
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
+    if (activeTab !== "pusaka") return;
     (async () => {
       setLoaded(false);
       const ledger = await gJSON("tips:ledger", true, []);
@@ -1753,41 +1863,162 @@ function LeaderboardScreen({ ctx }) {
       const totals = {};
       for (const t of ledger) {
         if (t.ts < cutoff) continue;
+        const novel = novels.find((n) => n.id === t.novelId);
+        if (genreFilter && (!novel || novel.genre !== GENRES.find((g) => g.id === genreFilter).label)) continue;
         if (!totals[t.novelId]) totals[t.novelId] = { novelId: t.novelId, title: t.novelTitle, author: t.authorName || t.author, amount: 0 };
         totals[t.novelId].amount += t.amount;
       }
       setRanking(Object.values(totals).sort((a, b) => b.amount - a.amount).slice(0, 20));
       setLoaded(true);
     })();
-  }, [range]);
+  }, [range, activeTab, genreFilter, novels.length]);
+
+  const genreLabel = genreFilter ? GENRES.find((g) => g.id === genreFilter).label : null;
+  const categoryList = activeTab !== "pusaka" ? getCategoryList(activeTab, novels).filter((n) => !genreFilter || n.genre === genreLabel).slice(0, 20) : [];
 
   return (
-    <div style={{ padding: 18 }}>
-      <div style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 19, marginBottom: 4 }}>Daftar Pendekar Langit</div>
-      <div style={{ fontSize: 11.5, color: C.textFaint, marginBottom: 16 }}>Peringkat berdasarkan Pedang Pusaka & Pil Dewa (tipping)</div>
+    <div>
+      <div style={{ padding: "18px 18px 0" }}>
+        <div style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 800, fontSize: 19, marginBottom: 4 }}>Daftar Pendekar Langit</div>
+        <div style={{ fontSize: 11.5, color: C.textFaint, marginBottom: 14 }}>Papan peringkat jianghu, dari segala penjuru aliran</div>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
-        <SubTabBtn label="Mingguan" active={range === "weekly"} onClick={() => setRange("weekly")} />
-        <SubTabBtn label="Bulanan" active={range === "monthly"} onClick={() => setRange("monthly")} />
+        <div style={{ display: "flex", gap: 7, overflowX: "auto", paddingBottom: 4, scrollbarWidth: "none" }}>
+          <button
+            onClick={() => setGenreFilter(null)}
+            style={{
+              whiteSpace: "nowrap",
+              padding: "6px 13px",
+              borderRadius: 999,
+              border: `1.5px solid ${!genreFilter ? C.jade : C.border}`,
+              background: !genreFilter ? C.jadeGlow : "transparent",
+              color: !genreFilter ? C.jade : C.textSoft,
+              fontSize: 11.5,
+              fontWeight: 700,
+              cursor: "pointer",
+              flexShrink: 0,
+            }}
+          >
+            Semua Aliran
+          </button>
+          {GENRES.map((g) => (
+            <button
+              key={g.id}
+              onClick={() => setGenreFilter(genreFilter === g.id ? null : g.id)}
+              style={{
+                whiteSpace: "nowrap",
+                padding: "6px 13px",
+                borderRadius: 999,
+                border: `1.5px solid ${genreFilter === g.id ? C.jade : C.border}`,
+                background: genreFilter === g.id ? C.jadeGlow : "transparent",
+                color: genreFilter === g.id ? C.jade : C.textSoft,
+                fontSize: 11.5,
+                fontWeight: 700,
+                cursor: "pointer",
+                flexShrink: 0,
+              }}
+            >
+              {g.label}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {loaded && ranking.length === 0 && <div style={{ textAlign: "center", padding: "40px 20px", color: C.textFaint, fontSize: 13, lineHeight: 1.6 }}>Belum ada kitab yang menerima persembahan pusaka di periode ini.</div>}
+      <div style={{ display: "flex", marginTop: 14 }}>
+        <div style={{ width: 78, flexShrink: 0, display: "flex", flexDirection: "column", gap: 4, padding: "0 6px 18px 10px" }}>
+          {LEADERBOARD_TABS.map((t) => {
+            const active = activeTab === t.id;
+            return (
+              <button
+                key={t.id}
+                onClick={() => setActiveTab(t.id)}
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  gap: 4,
+                  padding: "10px 4px",
+                  borderRadius: 12,
+                  border: `1.5px solid ${active ? C.jade : "transparent"}`,
+                  background: active ? C.jadeGlow : "transparent",
+                  cursor: "pointer",
+                }}
+              >
+                <span
+                  style={{
+                    width: 26,
+                    height: 26,
+                    borderRadius: "50%",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontFamily: "'Noto Serif SC', serif",
+                    fontWeight: 800,
+                    fontSize: 13,
+                    background: active ? C.jade : C.surfaceHi,
+                    color: active ? "#08170f" : C.textSoft,
+                  }}
+                >
+                  {t.glyph}
+                </span>
+                <span style={{ fontSize: 9, fontWeight: active ? 700 : 500, color: active ? C.jade : C.textFaint, textAlign: "center", lineHeight: 1.2 }}>{t.label}</span>
+              </button>
+            );
+          })}
+        </div>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {ranking.map((r, i) => (
-          <div
-            key={r.novelId}
-            onClick={() => push("story", { novelId: r.novelId })}
-            style={{ display: "flex", alignItems: "center", gap: 12, background: i < 3 ? C.goldGlow : C.surface, border: `1px solid ${i < 3 ? C.gold : C.border}`, borderRadius: 12, padding: "12px 14px", cursor: "pointer" }}
-          >
-            <div style={{ width: 28, fontFamily: "'IBM Plex Mono', monospace", fontWeight: 800, fontSize: 15, color: i < 3 ? C.gold : C.textFaint, textAlign: "center" }}>{i + 1}</div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontWeight: 700, fontSize: 13.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title}</div>
-              <div style={{ fontSize: 10.5, color: C.textFaint }}>oleh {r.author}</div>
-            </div>
-            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700, fontSize: 13, color: C.gold }}>{fmt(r.amount)} 💎</div>
-          </div>
-        ))}
+        <div style={{ flex: 1, minWidth: 0, paddingRight: 18, paddingBottom: 24 }}>
+          {activeTab === "pusaka" && (
+            <>
+              <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+                <SubTabBtn label="Mingguan" active={range === "weekly"} onClick={() => setRange("weekly")} />
+                <SubTabBtn label="Bulanan" active={range === "monthly"} onClick={() => setRange("monthly")} />
+              </div>
+              {loaded && ranking.length === 0 && <div style={{ textAlign: "center", padding: "30px 10px", color: C.textFaint, fontSize: 12.5, lineHeight: 1.6 }}>Belum ada kitab yang menerima persembahan pusaka di periode ini.</div>}
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {ranking.map((r, i) => (
+                  <div
+                    key={r.novelId}
+                    onClick={() => push("story", { novelId: r.novelId })}
+                    style={{ display: "flex", alignItems: "center", gap: 10, background: i < 3 ? C.goldGlow : C.surface, border: `1px solid ${i < 3 ? C.gold : C.border}`, borderRadius: 12, padding: "10px 12px", cursor: "pointer" }}
+                  >
+                    <div style={{ width: 22, fontFamily: "'IBM Plex Mono', monospace", fontWeight: 800, fontSize: 13.5, color: i < 3 ? C.gold : C.textFaint, textAlign: "center", flexShrink: 0 }}>{i + 1}</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 700, fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title}</div>
+                      <div style={{ fontSize: 10, color: C.textFaint }}>oleh {r.author}</div>
+                    </div>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontWeight: 700, fontSize: 12, color: C.gold, flexShrink: 0 }}>{fmt(r.amount)} 💎</div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+
+          {activeTab !== "pusaka" && (
+            <>
+              <div style={{ fontSize: 11, color: C.textFaint, marginBottom: 12 }}>{(CATEGORY_META[activeTab] || {}).subtitle}</div>
+              {categoryList.length === 0 && <div style={{ textAlign: "center", padding: "30px 10px", color: C.textFaint, fontSize: 12.5, lineHeight: 1.6 }}>Belum ada kitab di kategori ini.</div>}
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {categoryList.map((n, i) => (
+                  <div
+                    key={n.id}
+                    onClick={() => push("story", { novelId: n.id })}
+                    style={{ display: "flex", alignItems: "center", gap: 10, background: i < 3 ? C.goldGlow : C.surface, border: `1px solid ${i < 3 ? C.gold : C.border}`, borderRadius: 12, padding: "10px 12px", cursor: "pointer" }}
+                  >
+                    <div style={{ width: 22, fontFamily: "'IBM Plex Mono', monospace", fontWeight: 800, fontSize: 13.5, color: i < 3 ? C.gold : C.textFaint, textAlign: "center", flexShrink: 0 }}>{i + 1}</div>
+                    <CoverThumb novel={n} size="sm" radius={6} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 700, fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{n.title}</div>
+                      <div style={{ fontSize: 10, color: C.textFaint }}>oleh {n.authorName}</div>
+                      <div style={{ fontSize: 9.5, color: C.jade, fontWeight: 700, marginTop: 2 }}>
+                        {activeTab === "disukai" && n.ratingCount ? `⭐ ${(n.ratingSum / n.ratingCount).toFixed(1)}` : `👁 ${fmt(n.reads || 0)}`}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -2882,7 +3113,7 @@ function DonateScreen({ ctx, onBack }) {
    SETTINGS — Account & App
 ================================================================ */
 function SettingsScreen({ ctx, onBack }) {
-  const { user, updateDisplayName, sendPasswordReset, deleteAccount, doLogout, showToast, push, isAdmin } = ctx;
+  const { user, updateDisplayName, sendPasswordReset, deleteAccount, doLogout, showToast, push, isAdmin, themeMode, setTheme } = ctx;
   const [nameDraft, setNameDraft] = useState(user ? user.displayName : "");
   const [savingName, setSavingName] = useState(false);
   const [resetBusy, setResetBusy] = useState(false);
@@ -2915,11 +3146,58 @@ function SettingsScreen({ ctx, onBack }) {
     }
   }
 
-  if (!user) return <TopBar title="Pengaturan" onBack={onBack} />;
+  const themeSection = (
+    <div style={{ padding: 18, paddingBottom: 0 }}>
+      <div style={{ fontWeight: 700, fontSize: 13.5, marginBottom: 10 }}>Tampilan</div>
+      <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
+        <button
+          onClick={() => setTheme("dark")}
+          style={{
+            flex: 1,
+            padding: "14px 0",
+            borderRadius: 12,
+            border: `2px solid ${themeMode === "dark" ? C.jade : C.border}`,
+            background: themeMode === "dark" ? C.jadeGlow : C.surface,
+            cursor: "pointer",
+            textAlign: "center",
+          }}
+        >
+          <div style={{ fontSize: 22 }}>🌙</div>
+          <div style={{ fontSize: 12, fontWeight: 700, marginTop: 6, color: C.text }}>Gelap</div>
+        </button>
+        <button
+          onClick={() => setTheme("light")}
+          style={{
+            flex: 1,
+            padding: "14px 0",
+            borderRadius: 12,
+            border: `2px solid ${themeMode === "light" ? C.jade : C.border}`,
+            background: themeMode === "light" ? C.jadeGlow : C.surface,
+            cursor: "pointer",
+            textAlign: "center",
+          }}
+        >
+          <div style={{ fontSize: 22 }}>☀️</div>
+          <div style={{ fontSize: 12, fontWeight: 700, marginTop: 6, color: C.text }}>Terang</div>
+        </button>
+      </div>
+      <BambooDivider />
+    </div>
+  );
+
+  if (!user) {
+    return (
+      <div>
+        <TopBar title="Pengaturan" onBack={onBack} />
+        {themeSection}
+      </div>
+    );
+  }
 
   return (
     <div>
       <TopBar title="Pengaturan Aplikasi & Akun" onBack={onBack} />
+      {themeSection}
       <div style={{ padding: 18 }}>
         <div style={{ fontWeight: 700, fontSize: 13.5, marginBottom: 10 }}>Akun</div>
 
@@ -3194,6 +3472,7 @@ function StudioNovelScreen({ novelId, ctx, onBack }) {
   const [glyph, setGlyph] = useState(GLYPHS[0]);
   const [coverImage, setCoverImage] = useState(null);
   const [uploadingCover, setUploadingCover] = useState(false);
+  const [status, setStatus] = useState("ongoing");
   const [saving, setSaving] = useState(false);
 
   async function reload() {
@@ -3205,6 +3484,7 @@ function StudioNovelScreen({ novelId, ctx, onBack }) {
       setGenre(n.genre);
       setGlyph(n.glyph);
       setCoverImage(n.coverImage || null);
+      setStatus(n.status || "ongoing");
       const chs = [];
       for (const cid of n.chapterIds) {
         const c = await gJSON(`chapter:${novelId}:${cid}`, true, null);
@@ -3233,7 +3513,7 @@ function StudioNovelScreen({ novelId, ctx, onBack }) {
 
   async function handleSaveMeta() {
     setSaving(true);
-    const next = { ...novel, title, synopsis, genre, glyph, coverImage };
+    const next = { ...novel, title, synopsis, genre, glyph, coverImage, status };
     await ctx.saveNovel(next);
     setNovel(next);
     setSaving(false);
@@ -3336,6 +3616,22 @@ function StudioNovelScreen({ novelId, ctx, onBack }) {
                   {g}
                 </button>
               ))}
+            </div>
+          </Field>
+          <Field label="Status Cerita">
+            <div style={{ display: "flex", gap: 10 }}>
+              <button
+                onClick={() => setStatus("ongoing")}
+                style={{ flex: 1, padding: "10px 0", borderRadius: 10, border: `1.5px solid ${status === "ongoing" ? C.jade : C.border}`, background: status === "ongoing" ? C.jadeGlow : "transparent", color: status === "ongoing" ? C.jade : C.textSoft, fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}
+              >
+                Masih Berlanjut
+              </button>
+              <button
+                onClick={() => setStatus("completed")}
+                style={{ flex: 1, padding: "10px 0", borderRadius: 10, border: `1.5px solid ${status === "completed" ? C.gold : C.border}`, background: status === "completed" ? C.goldGlow : "transparent", color: status === "completed" ? C.gold : C.textSoft, fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}
+              >
+                Tuntas (Tamat)
+              </button>
             </div>
           </Field>
           <button onClick={handleSaveMeta} disabled={saving} style={{ width: "100%", padding: "12px 0", borderRadius: 10, border: "none", background: C.jade, color: "#08170f", fontWeight: 800, fontSize: 13.5, cursor: "pointer", marginBottom: 24 }}>
