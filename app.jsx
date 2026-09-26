@@ -159,7 +159,7 @@ const LANGUAGES = [
 // dokumen config:* (info donasi, pengumuman) oleh Firestore Rules di server.
 // Mengganti nilai ini saja TIDAK CUKUP; kamu juga wajib menyalin string yang
 // SAMA PERSIS ke Firestore Rules (lihat instruksi di chat).
-const ADMIN_EMAIL = "icalmen@gmail.com";
+const ADMIN_EMAIL = "gantidenganemailkamu@gmail.com";
 
 function uid(p) {
   return `${p}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
@@ -780,6 +780,7 @@ function App() {
     // comments, and library saves also call saveNovel() but shouldn't make
     // a story look freshly updated in the "Update Cersil" feed.
     if (chapter.status === "published") {
+      novel.lastChapterId = chapter.id;
       novel.lastChapterTitle = chapter.title;
       novel.lastChapterOrder = chapter.order;
       novel.lastChapterUpdatedAt = Date.now();
@@ -792,6 +793,7 @@ function App() {
     if (chapter.status === "published") {
       const novel = await gJSON(`novel:${chapter.novelId}`, true, null);
       if (novel) {
+        novel.lastChapterId = chapter.id;
         novel.lastChapterTitle = chapter.title;
         novel.lastChapterOrder = chapter.order;
         novel.lastChapterUpdatedAt = Date.now();
@@ -826,7 +828,8 @@ function App() {
       earn.ledger = earn.ledger.slice(0, 150);
       await sJSON(key, earn, true);
     }
-    novel.reads = (novel.reads || 0) + 1;
+    // reads is now incremented once, universally, inside markProgress —
+    // doing it here too would double-count every premium chapter unlock.
     await saveNovel(novel);
   }
   async function isUnlocked(novelId, chapterId) {
@@ -959,6 +962,15 @@ function App() {
       if (next.chaptersRead >= m && !next.badges.includes(badgeName)) next.badges = [...next.badges, badgeName];
     }
     await saveUser(next);
+
+    // The real "jumlah pembaca" signal — it used to only bump on premium
+    // chapter unlocks, so free chapters (the vast majority) never counted
+    // toward a story's read count. Every successful chapter view counts now.
+    const novel = await gJSON(`novel:${novelId}`, true, null);
+    if (novel) {
+      novel.reads = (novel.reads || 0) + 1;
+      await saveNovel(novel);
+    }
   }
 
   if (!ready || booting) {
@@ -1633,7 +1645,11 @@ function NovelRow({ categoryId, novels, ctx, subtitleMode }) {
       <CategoryHeader categoryId={categoryId} ctx={ctx} />
       <div style={{ display: "flex", gap: 12, overflowX: "auto", margin: "0 -18px", padding: "0 18px 4px", scrollbarWidth: "none" }}>
         {novels.map((n) => (
-          <div key={n.id} onClick={() => push("story", { novelId: n.id })} style={{ width: 110, flexShrink: 0, cursor: "pointer" }}>
+          <div
+            key={n.id}
+            onClick={() => (subtitleMode === "lastChapter" && n.lastChapterId ? push("reader", { novelId: n.id, chapterId: n.lastChapterId }) : push("story", { novelId: n.id }))}
+            style={{ width: 110, flexShrink: 0, cursor: "pointer" }}
+          >
             <div style={{ marginBottom: 6, position: "relative" }}>
               <CoverThumb novel={n} size="md" />
               {n.genre && (
@@ -1797,7 +1813,7 @@ function LibraryScreen({ ctx }) {
             const total = novel.chapterIds.length || 1;
             const pct = Math.min(100, Math.round((progress.lastOrder / total) * 100));
             return (
-              <div key={novel.id} onClick={() => push("story", { novelId: novel.id })} style={{ display: "flex", gap: 12, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 14, cursor: "pointer" }}>
+              <div key={novel.id} onClick={() => push("reader", { novelId: novel.id, chapterId: progress.lastChapterId })} style={{ display: "flex", gap: 12, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, padding: 14, cursor: "pointer" }}>
                 <CoverThumb novel={novel} size="sm" radius={8} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, gap: 8 }}>
